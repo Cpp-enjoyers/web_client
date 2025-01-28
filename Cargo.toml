@@ -1,0 +1,16 @@
+[package]
+name = "client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wg_2024 = { git = "https://github.com/WGL-2024/WGL_repo_2024.git", features = ["serialize", "debug"] }
+common = {git = "https://github.com/Cpp-enjoyers/common.git"}
+crossbeam-channel = "0.5"
+compression = {git = "https://github.com/Cpp-enjoyers/compression_lib.git"}
+bincode = {version = "2.0.0-rc", features = ["serde"]}
+petgraph = "0.7"
+
+ap2024_unitn_cppenjoyers_drone = { git = "https://github.com/Cpp-enjoyers/drone.git" }
+
+# dr_ones = { git = "https://github.com/Dr-Ones/drone" }
