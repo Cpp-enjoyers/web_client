@@ -19,7 +19,7 @@ use std::thread::sleep;
 use wg_2024::network::{NodeId, SourceRoutingHeader};
 use wg_2024::packet::{self, *};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum GraphNodeType {
     Text,
     Media,
@@ -195,13 +195,13 @@ impl PacketIdWrapper {
 
     fn from_u64(n: u64) -> Self {
         Self {
-            session_id: n & 0xFFFFFFFFFFFF,
+            session_id: n >> 16,
             req_id: (n & 0xFFFF) as u16,
         }
     }
 
     fn get_session_id(&self) -> u64 {
-        self.session_id & 0xFFFFFFFFFFFF
+        self.session_id & 0x0000FFFFFFFFFFFF
     }
 
     fn get_request_id(&self) -> u16 {
@@ -214,7 +214,7 @@ impl PacketIdWrapper {
 
     fn increment_session_id(&mut self) {
         self.session_id += 1;
-        self.session_id &= 0xFFFFFFFFFFFF;
+        self.session_id &= 0x0000FFFFFFFFFFFF;
     }
 
     fn increment_request_id(&mut self) {
@@ -435,7 +435,11 @@ impl WebBrowser {
        an updated packet and an optional channel.
        if no path exist or the channel isn't open, the option is None
     */
-    fn prepare_packet_routing(&self, mut packet: Packet, dest: NodeId,) -> (Packet, Option<&Sender<Packet>>) {
+    fn prepare_packet_routing(
+        &self,
+        mut packet: Packet,
+        dest: NodeId,
+    ) -> (Packet, Option<&Sender<Packet>>) {
         packet.routing_header = SourceRoutingHeader::empty_route();
 
         if let Some(routing_header) = self.source_routing_header_from_graph_search(dest) {
@@ -486,7 +490,7 @@ impl WebBrowser {
                             {
                                 self.topology_graph.add_edge(*id, from.0, 1);
                             } else if matches!(node_type, NodeType::Client)
-                            | matches!(node_type, NodeType::Server)
+                                | matches!(node_type, NodeType::Server)
                             {
                                 self.topology_graph.add_edge(from.0, *id, 1);
                             } else {
@@ -505,7 +509,6 @@ impl WebBrowser {
                     );
 
                     //self.try_resend_waiting_for_flood_packets();
-
                 } else {
                     match packet.routing_header.next_hop() {
                         Some(next_hop_drone_id) => {
@@ -547,11 +550,11 @@ impl WebBrowser {
                                         .position(|e| e.get_fragment_index() == ack.fragment_index)
                                     {
                                         Some(idx) => {
-                                            println!("ACK valid");
                                             req.waiting_for_ack.remove(idx);
                                         }
 
                                         None => {
+
                                             println!("client {} - I received an ack for a packet that has already been acknowledged, bug for me or for the sender", self.id);
                                         }
                                     }
@@ -581,6 +584,7 @@ impl WebBrowser {
                     Some(id) => {
                         // I'm the destination of the packet
                         if id == self.id {
+                            println!("-----packet id: {}", packet.session_id & 0xffff);
                             let req_id =
                                 PacketIdWrapper::from_u64(packet.session_id).get_request_id();
 
@@ -624,7 +628,7 @@ impl WebBrowser {
                                 }
 
                                 None => {
-                                    println!("client {} - I received a fragment for a req_id that it's unknown to me, dropping", self.id);
+                                    println!("client {} - I received a fragment for req_id \"{}\" that it's unknown to me, dropping", self.id, req_id);
                                 }
                             }
                         }
@@ -704,21 +708,22 @@ impl WebBrowser {
                                     _ => {}
                                 }
                             }
-                            self.controller_send.send(ClientEvent::ServersTypes(list));
+                            let _ = self.controller_send.send(ClientEvent::ServersTypes(list));
                         }
                     }
                     GenericResponse::InvalidRequest => {
-                        self.controller_send.send(ClientEvent::UnsupportedRequest);
+                        let _ = self.controller_send.send(ClientEvent::UnsupportedRequest);
                     }
                     GenericResponse::NotFound => {
-                        self.controller_send.send(ClientEvent::UnsupportedRequest);
+                        let _ = self.controller_send.send(ClientEvent::UnsupportedRequest);
                     }
                 }
             }
             Response::Text(resp) => {
                 match resp {
                     TextResponse::TextList(vec) => {
-                        self.controller_send
+                        let _ = self
+                            .controller_send
                             .send(ClientEvent::ListOfFiles(vec, req.server_id));
                     }
                     TextResponse::Text(file) => {
@@ -829,13 +834,7 @@ impl WebBrowser {
     }
 
     fn source_routing_header_from_graph_search(&self, dest: NodeId) -> Option<SourceRoutingHeader> {
-        match astar(
-            &self.topology_graph,
-            self.id,
-            |n| n == dest,
-            |e| 1,
-            |_| 0,
-        ) {
+        match astar(&self.topology_graph, self.id, |n| n == dest, |e| 1, |_| 0) {
             Some((_, path)) => Some(wg_2024::network::SourceRoutingHeader::with_first_hop(path)),
             None => None,
         }
@@ -850,8 +849,6 @@ impl WebBrowser {
     ) {
         println!("Adding request");
         let opt = self.source_routing_header_from_graph_search(server_id);
-
-        println!("---- {:?}", opt);
 
         let mut waiting_for_ack = vec![];
         let mut waiting_for_flood = vec![];
@@ -904,6 +901,12 @@ impl WebBrowser {
         self.packet_id_counter.increment_request_id();
     }
 
+    fn is_correct_server_type(&self, server_id: NodeId, requested_type: GraphNodeType) -> bool {
+        self.nodes_type
+            .get(&server_id)
+            .is_some_and(|t| *t == requested_type)
+    }
+
     fn create_request(&mut self, request_type: RequestType) {
         let compression: Compression = Compression::None; // TODO has to be chosen by scl or randomically
 
@@ -940,6 +943,11 @@ impl WebBrowser {
             }
 
             RequestType::MediaRequest(filename, server_id) => {
+                if !self.is_correct_server_type(*server_id, GraphNodeType::Media) {
+                    let _ = self.controller_send.send(ClientEvent::UnsupportedRequest);
+                    return;
+                }
+
                 let frags =
                     web_messages::RequestMessage::new_media_request(self.id, compression.clone(), filename.clone())
                         .fragment()
@@ -949,6 +957,11 @@ impl WebBrowser {
             }
 
             RequestType::TextRequest(filename, server_id) => {
+                if !self.is_correct_server_type(*server_id, GraphNodeType::Text) {
+                    let _ = self.controller_send.send(ClientEvent::UnsupportedRequest);
+                    return;
+                }
+
                 let frags =
                     web_messages::RequestMessage::new_text_request(self.id, compression.clone(), filename.clone())
                         .fragment()
@@ -967,7 +980,7 @@ mod client_tests {
     use ap2024_unitn_cppenjoyers_drone::CppEnjoyersDrone;
     use common::Client;
     use crossbeam_channel::unbounded;
-    use wg_2024::{controller::{DroneCommand, DroneEvent}, drone::Drone, packet};
+    use wg_2024::{controller::DroneCommand, drone::Drone};
 
     use crate::*;
 
@@ -1380,9 +1393,7 @@ mod client_tests {
         let (c_command_send, c_command_recv) = unbounded();
 
         // Drone 11
-        let neighbours11 = HashMap::from([
-            (1, c_send.clone()),
-        ]);
+        let neighbours11 = HashMap::from([(1, c_send.clone())]);
         let mut drone = CppEnjoyersDrone::new(
             11,
             unbounded().0,
@@ -1392,7 +1403,7 @@ mod client_tests {
             0.0,
         );
         // Drone 12
-        let neighbours12 = HashMap::from([(13, d13_send.clone()),]);
+        let neighbours12 = HashMap::from([(13, d13_send.clone())]);
         let mut drone2 = CppEnjoyersDrone::new(
             12,
             unbounded().0,
@@ -1402,9 +1413,7 @@ mod client_tests {
             0.0,
         );
         // Drone 13
-        let neighbours13 = HashMap::from([
-            (12, d12_send.clone()),
-        ]);
+        let neighbours13 = HashMap::from([(12, d12_send.clone())]);
         let mut drone3 = CppEnjoyersDrone::new(
             13,
             unbounded().0,
@@ -1413,7 +1422,6 @@ mod client_tests {
             neighbours13,
             0.0,
         );
-
 
         // client 1
         let neighbours1 = HashMap::from([(11, d_send.clone())]);
@@ -1462,8 +1470,7 @@ mod client_tests {
     }
 
     #[test]
-    pub fn file_list_request(){
-
+    pub fn file_list_request() {
         // client 1 <--> 11 <--> 21 server
 
         // Client 1 channels
@@ -1498,13 +1505,13 @@ mod client_tests {
             neighbours1,
         );
 
-        thread::spawn(move ||{
+        thread::spawn(move || {
             drone.run();
         });
 
         sleep(Duration::from_secs(1));
 
-        thread::spawn(move ||{
+        thread::spawn(move || {
             client1.run();
         });
 
@@ -1512,12 +1519,20 @@ mod client_tests {
         c_event_recv.recv().unwrap();
 
         let _flood_request = s_recv.recv().unwrap();
-        let flood_response = Packet::new_flood_response(SourceRoutingHeader {
-            hop_index: 1,
-            hops: vec![21, 11, 1]
-         },
+        let flood_response = Packet::new_flood_response(
+            SourceRoutingHeader {
+                hop_index: 1,
+                hops: vec![21, 11, 1],
+            },
             0,
-            FloodResponse { flood_id: 0, path_trace: vec![(1, NodeType::Client), (11, NodeType::Drone), (21, NodeType::Server)] }
+            FloodResponse {
+                flood_id: 0,
+                path_trace: vec![
+                    (1, NodeType::Client),
+                    (11, NodeType::Drone),
+                    (21, NodeType::Server),
+                ],
+            },
         );
 
         let _ = d_send.send(flood_response);
@@ -1529,7 +1544,7 @@ mod client_tests {
         // receive request
         //println!("{:?}", req);
         let req = s_recv.recv().unwrap();
-        let mut data= Vec::new();
+        let mut data = Vec::new();
         match req.pack_type {
             PacketType::MsgFragment(f) => data.push(f),
             _ => {}
@@ -1537,45 +1552,432 @@ mod client_tests {
         let resp = RequestMessage::defragment(&data, Compression::None).unwrap();
         c_event_recv.recv().unwrap();
 
-        assert_eq!(resp, RequestMessage{
-            compression_type: Compression::None,
-            source_id: 1,
-            content: web_messages::Request::Text(TextRequest::TextList)
-        });
+        assert_eq!(
+            resp,
+            RequestMessage {
+                compression_type: Compression::None,
+                source_id: 1,
+                content: web_messages::Request::Text(TextRequest::TextList)
+            }
+        );
         // ACK
-        let _ = d_send.send(Packet::new_ack(SourceRoutingHeader { hop_index: 1, hops: vec![21, 11, 1] }, req.session_id, 0));
+        let _ = d_send.send(Packet::new_ack(
+            SourceRoutingHeader {
+                hop_index: 1,
+                hops: vec![21, 11, 1],
+            },
+            req.session_id,
+            0,
+        ));
 
         // response
         let data = web_messages::ResponseMessage::new_text_list_response(
             21,
-            Compression::None, vec!["file1".to_string(), "file2".to_string()]).fragment().unwrap();
+            Compression::None,
+            vec!["file1".to_string(), "file2".to_string()],
+        )
+        .fragment()
+        .unwrap();
         assert_eq!(data.len(), 1);
 
-        let _ = d_send.send(Packet::new_fragment(SourceRoutingHeader { hop_index: 1, hops: vec![21, 11, 1] },
+        let _ = d_send.send(Packet::new_fragment(
+            SourceRoutingHeader {
+                hop_index: 1,
+                hops: vec![21, 11, 1],
+            },
             1 << 50,
-            data[0].clone()
+            data[0].clone(),
         ));
 
         sleep(Duration::from_secs(1));
         c_event_recv.recv().unwrap();
 
-        assert_eq!(s_recv.recv().unwrap(), Packet{
-            session_id: 1 << 50,
-            routing_header: SourceRoutingHeader { hop_index: 2, hops: vec![1, 11, 21] },
-            pack_type: PacketType::Ack(Ack { fragment_index: 0 })
-        });
+        assert_eq!(
+            s_recv.recv().unwrap(),
+            Packet {
+                session_id: 1 << 50,
+                routing_header: SourceRoutingHeader {
+                    hop_index: 2,
+                    hops: vec![1, 11, 21]
+                },
+                pack_type: PacketType::Ack(Ack { fragment_index: 0 })
+            }
+        );
 
         let resp = c_event_recv.recv().unwrap();
         //println!("--{:?}", resp);
 
-        if let ClientEvent::ListOfFiles(files, id) = resp{
-
+        if let ClientEvent::ListOfFiles(files, id) = resp {
             assert_eq!(files, vec!["file1".to_string(), "file2".to_string()]);
-            assert_eq!(id,21);
-        }
-        else {
+            assert_eq!(id, 21);
+        } else {
             assert!(false)
         }
     }
 
+    #[test]
+    pub fn server_type_request() {
+        // client 1 <--> 11 <--> 21 server
+
+        // Client 1 channels
+        let (c_send, c_recv) = unbounded();
+        // Drone 11
+        let (d_send, d_recv) = unbounded();
+        // SC - needed to not make the drone crash
+        let (_d_command_send, d_command_recv) = unbounded();
+        let (c_event_send, c_event_recv) = unbounded();
+        let (c_command_send, c_command_recv) = unbounded();
+        // Server
+        let (s_send, s_recv) = unbounded();
+
+        // Drone 11
+        let neighbours11 = HashMap::from([(1, c_send.clone()), (21, s_send.clone())]);
+        let mut drone = CppEnjoyersDrone::new(
+            11,
+            unbounded().0,
+            d_command_recv.clone(),
+            d_recv.clone(),
+            neighbours11,
+            0.0,
+        );
+
+        // client 1
+        let neighbours1 = HashMap::from([(11, d_send.clone())]);
+        let mut client1 = WebBrowser::new(
+            1,
+            c_event_send.clone(),
+            c_command_recv,
+            c_recv.clone(),
+            neighbours1,
+        );
+
+        thread::spawn(move || {
+            drone.run();
+        });
+
+        sleep(Duration::from_secs(1));
+
+        thread::spawn(move || {
+            client1.run();
+        });
+
+        sleep(Duration::from_secs(1));
+        c_event_recv.recv().unwrap();
+
+        let _flood_request = s_recv.recv().unwrap();
+        let flood_response = Packet::new_flood_response(
+            SourceRoutingHeader {
+                hop_index: 1,
+                hops: vec![21, 11, 1],
+            },
+            0,
+            FloodResponse {
+                flood_id: 0,
+                path_trace: vec![
+                    (1, NodeType::Client),
+                    (11, NodeType::Drone),
+                    (21, NodeType::Server),
+                ],
+            },
+        );
+
+        let _ = d_send.send(flood_response);
+
+        sleep(Duration::from_secs(1));
+
+        let _ = c_command_send.send(ClientCommand::AskServersTypes);
+
+        // receive request
+        //println!("{:?}", req);
+        let req = s_recv.recv().unwrap();
+        let mut data = Vec::new();
+        match req.pack_type {
+            PacketType::MsgFragment(f) => data.push(f),
+            _ => {}
+        };
+        let resp = RequestMessage::defragment(&data, Compression::None).unwrap();
+        c_event_recv.recv().unwrap();
+
+        assert_eq!(
+            resp,
+            RequestMessage {
+                compression_type: Compression::None,
+                source_id: 1,
+                content: web_messages::Request::Type
+            }
+        );
+        // send ACK to client
+        let _ = d_send.send(Packet::new_ack(
+            SourceRoutingHeader {
+                hop_index: 1,
+                hops: vec![21, 11, 1],
+            },
+            req.session_id,
+            0,
+        ));
+
+        // response
+        let data = web_messages::ResponseMessage::new_type_response(
+            21,
+            Compression::None,
+            ServerType::FileServer,
+        )
+        .fragment()
+        .unwrap();
+        assert_eq!(data.len(), 1);
+
+        let _ = d_send.send(Packet::new_fragment(
+            SourceRoutingHeader {
+                hop_index: 1,
+                hops: vec![21, 11, 1],
+            },
+            3 << 50,
+            data[0].clone(),
+        ));
+
+        sleep(Duration::from_secs(1));
+        c_event_recv.recv().unwrap();
+
+        // control ACK from client
+        assert_eq!(
+            s_recv.recv().unwrap(),
+            Packet {
+                session_id: 3 << 50,
+                routing_header: SourceRoutingHeader {
+                    hop_index: 2,
+                    hops: vec![1, 11, 21]
+                },
+                pack_type: PacketType::Ack(Ack { fragment_index: 0 })
+            }
+        );
+
+        // control client response to scl
+        let resp = c_event_recv.recv().unwrap();
+        //println!("--{:?}", resp);
+
+        if let ClientEvent::ServersTypes(map) = resp {
+            assert_eq!(map, HashMap::from([(21, ServerType::FileServer)]));
+        } else {
+            assert!(false)
+        }
+    }
+
+    #[test]
+    pub fn file_request_no_media() {
+        // client 1 <--> 11 <--> 21 server
+
+        // Client 1 channels
+        let (c_send, c_recv) = unbounded();
+        // Drone 11
+        let (d_send, d_recv) = unbounded();
+        // SC - needed to not make the drone crash
+        let (_d_command_send, d_command_recv) = unbounded();
+        let (c_event_send, c_event_recv) = unbounded();
+        let (c_command_send, c_command_recv) = unbounded();
+        // Server
+        let (s_send, s_recv) = unbounded();
+
+        // Drone 11
+        let neighbours11 = HashMap::from([(1, c_send.clone()), (21, s_send.clone())]);
+        let mut drone = CppEnjoyersDrone::new(
+            11,
+            unbounded().0,
+            d_command_recv.clone(),
+            d_recv.clone(),
+            neighbours11,
+            0.0,
+        );
+
+        // client 1
+        let neighbours1 = HashMap::from([(11, d_send.clone())]);
+        let mut client1 = WebBrowser::new(
+            1,
+            c_event_send.clone(),
+            c_command_recv,
+            c_recv.clone(),
+            neighbours1,
+        );
+
+        thread::spawn(move || {
+            drone.run();
+        });
+        sleep(Duration::from_secs(1));
+        thread::spawn(move || {
+            client1.run();
+        });
+        sleep(Duration::from_secs(1));
+        c_event_recv.recv().unwrap();
+
+        // receive flood request and send response
+        let _flood_request = s_recv.recv().unwrap();
+        let flood_response = Packet::new_flood_response(
+            SourceRoutingHeader {
+                hop_index: 1,
+                hops: vec![21, 11, 1],
+            },
+            0,
+            FloodResponse {
+                flood_id: 0,
+                path_trace: vec![
+                    (1, NodeType::Client),
+                    (11, NodeType::Drone),
+                    (21, NodeType::Server),
+                ],
+            },
+        );
+        let _ = d_send.send(flood_response);
+        sleep(Duration::from_secs(1));
+
+        // send ServerType command to drone
+        let _ = c_command_send.send(ClientCommand::AskServersTypes);
+
+        // receive type request from client
+        //println!("{:?}", req);
+        let req = s_recv.recv().unwrap();
+        assert_eq!(req.session_id, 0);
+        let mut data = Vec::new();
+        match req.pack_type {
+            PacketType::MsgFragment(f) => data.push(f),
+            _ => {}
+        };
+        let resp = RequestMessage::defragment(&data, Compression::None).unwrap();
+        c_event_recv.recv().unwrap();
+
+        assert_eq!(
+            resp,
+            RequestMessage {
+                compression_type: Compression::None,
+                source_id: 1,
+                content: web_messages::Request::Type
+            }
+        );
+        // send ACK
+        let _ = d_send.send(Packet::new_ack(
+            SourceRoutingHeader {
+                hop_index: 1,
+                hops: vec![21, 11, 1],
+            },
+            0,
+            0,
+        ));
+
+        // send my type
+        let data = web_messages::ResponseMessage::new_type_response(
+            21,
+            Compression::None,
+            ServerType::FileServer,
+        )
+        .fragment()
+        .unwrap();
+        assert_eq!(data.len(), 1);
+
+        let _ = d_send.send(Packet::new_fragment(
+            SourceRoutingHeader {
+                hop_index: 1,
+                hops: vec![21, 11, 1],
+            },
+            0,
+            data[0].clone(),
+        ));
+
+        sleep(Duration::from_secs(1));
+
+        // client response to scl
+        c_event_recv.recv().unwrap();
+        assert_eq!(
+            s_recv.recv().unwrap(),
+            Packet {
+                session_id: 0,
+                routing_header: SourceRoutingHeader {
+                    hop_index: 2,
+                    hops: vec![1, 11, 21]
+                },
+                pack_type: PacketType::Ack(Ack { fragment_index: 0 })
+            }
+        );
+        let resp = c_event_recv.recv().unwrap();
+        //println!("--{:?}", resp);
+        if let ClientEvent::ServersTypes(map) = resp {
+            assert_eq!(map, HashMap::from([(21, ServerType::FileServer)]));
+        } else {
+            assert!(false)
+        }
+
+        let file = r#"Dolor molestiae debitis asperiores provident aut odit ratione. Sit totam officia dolores eos cumque blanditiis amet. Nesciunt voluptas voluptatem quas amet illum ipsam corrupti voluptate. Perspiciatis necessitatibus occaecati aliquid. Tempore id voluptas perferendis. Quis molestias enim veniam.
+        Architecto enim sequi et sunt ut iusto repellendus. Voluptatem placeat iure veniam recusandae sit velit. Autem sed vel error et eaque aperiam deserunt. Vero iste quibusdam qui alias ullam qui et quo.
+        Et eligendi voluptas ut nobis iste culpa est aliquam. Saepe quos commodi assumenda beatae voluptatem. Aliquam occaecati quia ut. Possimus aut officiis deleniti non. Qui voluptas enim nemo et.
+        Ut expedita aut cum minima quo nostrum. Nemo distinctio non rem voluptatem reiciendis incidunt vel soluta. Voluptatem autem aut et alias sunt. Et et quo mollitia necessitatibus earum.
+        Nihil qui odit cum temporibus. Alias sit quos est placeat. Non iste placeat voluptatem est ipsum aperiam recusandae nulla. Praesentium vel quis doloremque nemo quae. Et tempora beatae sunt corporis asperiores nesciunt."#.to_string();
+
+        // send file command to client
+        let _ = c_command_send.send(ClientCommand::RequestFile("file1".to_string(), 21));
+
+        // receive file request from client
+        let req = s_recv.recv().unwrap();
+        assert_eq!(req.session_id, 1);
+        //println!("****{:?}", req);
+        let mut data = Vec::new();
+        match req.pack_type {
+            PacketType::MsgFragment(f) => data.push(f),
+            _ => {}
+        };
+        let resp = RequestMessage::defragment(&data, Compression::None).unwrap();
+        c_event_recv.recv().unwrap();
+
+        assert_eq!(
+            resp,
+            RequestMessage {
+                compression_type: Compression::None,
+                source_id: 1,
+                content: web_messages::Request::Text(TextRequest::Text("file1".to_string()))
+            }
+        );
+        // send ACK
+        let _ = d_send.send(Packet::new_ack(
+            SourceRoutingHeader {
+                hop_index: 1,
+                hops: vec![21, 11, 1],
+            },
+            1,
+            0,
+        ));
+
+        // send my file
+        let data = web_messages::ResponseMessage::new_text_response(21, Compression::None, file)
+            .fragment()
+            .unwrap();
+
+        let n_frags = data.len();
+        let mut i = 0;
+        for f in data {
+            let _ = d_send.send(Packet::new_fragment(
+                SourceRoutingHeader {
+                    hop_index: 1,
+                    hops: vec![21, 11, 1],
+                },
+                1 << (22 + i) + 1,
+                f,
+            ));
+
+            i += 1;
+        }
+
+        sleep(Duration::from_secs(1));
+
+        // client response to scl
+        println!("**---***{:?}", c_event_recv.recv().unwrap());
+        assert_eq!(
+            s_recv.recv().unwrap(),
+            Packet {
+                session_id: 1 << (22 + i) + 1,
+                routing_header: SourceRoutingHeader {
+                    hop_index: 2,
+                    hops: vec![1, 11, 21]
+                },
+                pack_type: PacketType::Ack(Ack { fragment_index: 0 })
+            }
+        );
+        let resp = c_event_recv.recv().unwrap();
+        //println!("--{:?}", resp);
+    }
 }
