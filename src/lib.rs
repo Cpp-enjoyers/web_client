@@ -1943,41 +1943,57 @@ mod client_tests {
         ));
 
         // send my file
-        let data = web_messages::ResponseMessage::new_text_response(21, Compression::None, file)
+        let data = web_messages::ResponseMessage::new_text_response(21, Compression::None, file.clone())
             .fragment()
             .unwrap();
-
         let n_frags = data.len();
-        let mut i = 0;
+        let mut packet_id = PacketIdWrapper::from_u64(1);
+
         for f in data {
             let _ = d_send.send(Packet::new_fragment(
                 SourceRoutingHeader {
                     hop_index: 1,
                     hops: vec![21, 11, 1],
                 },
-                1 << (22 + i) + 1,
+                packet_id.get_id(),
                 f,
             ));
 
-            i += 1;
+           packet_id.increment_session_id();
+
         }
 
         sleep(Duration::from_secs(1));
+        let mut packet_id = PacketIdWrapper::from_u64(1);
 
-        // client response to scl
-        println!("**---***{:?}", c_event_recv.recv().unwrap());
-        assert_eq!(
-            s_recv.recv().unwrap(),
-            Packet {
-                session_id: 1 << (22 + i) + 1,
-                routing_header: SourceRoutingHeader {
-                    hop_index: 2,
-                    hops: vec![1, 11, 21]
-                },
-                pack_type: PacketType::Ack(Ack { fragment_index: 0 })
-            }
-        );
-        let resp = c_event_recv.recv().unwrap();
-        //println!("--{:?}", resp);
+        // ACKs to server
+        for i in 0..n_frags{
+            let _  = c_event_recv.recv().unwrap();
+            //println!("{i}");
+            assert_eq!(
+                s_recv.recv().unwrap(),
+                Packet {
+                    session_id: packet_id.get_id(),
+                    routing_header: SourceRoutingHeader {
+                        hop_index: 2,
+                        hops: vec![1, 11, 21]
+                    },
+                    pack_type: PacketType::Ack(Ack { fragment_index: i as u64})
+                }
+            );
+            packet_id.increment_session_id();
+
+        }
+
+        // client response
+        let a= c_event_recv.recv().unwrap();
+        //println!("-----{:?}", a);
+        if let ClientEvent::FileFromClient(content, id) = a{
+            assert_eq!(content, file);
+            assert_eq!(id, 21);
+        }
+        else {
+            assert!(false)
+        }
     }
 }
