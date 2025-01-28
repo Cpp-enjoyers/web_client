@@ -484,11 +484,11 @@ impl WebBrowser {
                             if matches!(from.1, NodeType::Client)
                                 | matches!(from.1, NodeType::Server)
                             {
-                                self.topology_graph.add_edge(from.0, *id, 1);
-                            } else if matches!(node_type, NodeType::Client)
-                                | matches!(node_type, NodeType::Server)
-                            {
                                 self.topology_graph.add_edge(*id, from.0, 1);
+                            } else if matches!(node_type, NodeType::Client)
+                            | matches!(node_type, NodeType::Server)
+                            {
+                                self.topology_graph.add_edge(from.0, *id, 1);
                             } else {
                                 self.topology_graph.add_edge(from.0, *id, 1);
                                 self.topology_graph.add_edge(*id, from.0, 1);
@@ -547,6 +547,7 @@ impl WebBrowser {
                                         .position(|e| e.get_fragment_index() == ack.fragment_index)
                                     {
                                         Some(idx) => {
+                                            println!("ACK valid");
                                             req.waiting_for_ack.remove(idx);
                                         }
 
@@ -769,6 +770,7 @@ impl WebBrowser {
     }
 
     fn handle_command(&mut self, command: ClientCommand) {
+        println!("Handing command {:?}", command);
         match command {
             ClientCommand::AddSender(id, sender) => {
                 self.packet_send.insert(id, sender);
@@ -831,7 +833,7 @@ impl WebBrowser {
             &self.topology_graph,
             self.id,
             |n| n == dest,
-            |e| *e.2,
+            |e| 1,
             |_| 0,
         ) {
             Some((_, path)) => Some(wg_2024::network::SourceRoutingHeader::with_first_hop(path)),
@@ -846,7 +848,10 @@ impl WebBrowser {
         frags: Vec<Fragment>,
         request_type: RequestType,
     ) {
+        println!("Adding request");
         let opt = self.source_routing_header_from_graph_search(server_id);
+
+        println!("---- {:?}", opt);
 
         let mut waiting_for_ack = vec![];
         let mut waiting_for_flood = vec![];
@@ -1342,7 +1347,7 @@ mod client_tests {
             11: [(1, Incoming), (1, Outgoing), (12, Incoming), (12, Outgoing), (13, Outgoing), (13, Incoming), (14, Outgoing), (14, Incoming)],
             13: [(11, Incoming), (11, Outgoing), (14, Outgoing), (14, Incoming), (2, Incoming)],
             14: [(13, Incoming), (13, Outgoing), (11, Incoming), (11, Outgoing), (2, Incoming)],
-            2: [(13, Outgoing), (14, Outgoing)]}
+            2: [(13, Incoming), (14, Incoming)]}
         }
         nodes type: {2: Client, 14: Drone, 11: Drone, 12: Drone, 13: Drone}
 
@@ -1352,7 +1357,7 @@ mod client_tests {
             13: [(2, Incoming), (2, Outgoing), (14, Incoming), (14, Outgoing), (11, Outgoing), (11, Incoming)],
             11: [(13, Incoming), (13, Outgoing), (14, Incoming), (14, Outgoing), (12, Outgoing), (12, Incoming), (1, Incoming)],
             12: [(11, Incoming), (11, Outgoing), (1, Incoming)],
-            1: [(12, Outgoing), (11, Outgoing)]
+            1: [(12, Incoming), (11, Incoming)]
         }
         nodes type: {1: Client, 13: Drone, 11: Drone, 12: Drone, 14: Drone}
         */
@@ -1457,20 +1462,23 @@ mod client_tests {
     }
 
     #[test]
-    pub fn remove_neighbour(){
+    pub fn file_list_request(){
+
+        // client 1 <--> 11 <--> 21 server
+
         // Client 1 channels
         let (c_send, c_recv) = unbounded();
         // Drone 11
         let (d_send, d_recv) = unbounded();
         // SC - needed to not make the drone crash
         let (_d_command_send, d_command_recv) = unbounded();
-        let (c_event_send, _) = unbounded();
+        let (c_event_send, c_event_recv) = unbounded();
         let (c_command_send, c_command_recv) = unbounded();
+        // Server
+        let (s_send, s_recv) = unbounded();
 
         // Drone 11
-        let neighbours11 = HashMap::from([
-            (1, c_send.clone()),
-        ]);
+        let neighbours11 = HashMap::from([(1, c_send.clone()), (21, s_send.clone())]);
         let mut drone = CppEnjoyersDrone::new(
             11,
             unbounded().0,
@@ -1480,31 +1488,94 @@ mod client_tests {
             0.0,
         );
 
-        thread::spawn(move || {
+        // client 1
+        let neighbours1 = HashMap::from([(11, d_send.clone())]);
+        let mut client1 = WebBrowser::new(
+            1,
+            c_event_send.clone(),
+            c_command_recv,
+            c_recv.clone(),
+            neighbours1,
+        );
+
+        thread::spawn(move ||{
             drone.run();
         });
 
         sleep(Duration::from_secs(1));
-        thread::spawn(move || {
+
+        thread::spawn(move ||{
             client1.run();
         });
 
-        _d12_command_send.send(DroneCommand::AddSender(1, c_send.clone()));
+        sleep(Duration::from_secs(1));
+        c_event_recv.recv().unwrap();
 
-        sleep(Duration::from_secs(2));
+        let _flood_request = s_recv.recv().unwrap();
+        let flood_response = Packet::new_flood_response(SourceRoutingHeader {
+            hop_index: 1,
+            hops: vec![21, 11, 1]
+         },
+            0,
+            FloodResponse { flood_id: 0, path_trace: vec![(1, NodeType::Client), (11, NodeType::Drone), (21, NodeType::Server)] }
+        );
 
-        c_command_send.send(ClientCommand::AddSender(12, d12_send.clone()));
+        let _ = d_send.send(flood_response);
 
-        sleep(Duration::from_secs(2));
-        /*
-        graph:
-            1: [(11, Outgoing), (11, Incoming), (12, Outgoing), (12, Incoming)],
-            11: [(1, Incoming), (1, Outgoing)],
-            12: [(1, Incoming), (1, Outgoing), (13, Outgoing), (13, Incoming)],
-            13: [(12, Incoming), (12, Outgoing)]
+        sleep(Duration::from_secs(1));
+
+        let _ = c_command_send.send(ClientCommand::AskListOfFiles(21));
+
+        // receive request
+        //println!("{:?}", req);
+        let req = s_recv.recv().unwrap();
+        let mut data= Vec::new();
+        match req.pack_type {
+            PacketType::MsgFragment(f) => data.push(f),
+            _ => {}
+        };
+        let resp = RequestMessage::defragment(&data, Compression::None).unwrap();
+        c_event_recv.recv().unwrap();
+
+        assert_eq!(resp, RequestMessage{
+            compression_type: Compression::None,
+            source_id: 1,
+            content: web_messages::Request::Text(TextRequest::TextList)
+        });
+        // ACK
+        let _ = d_send.send(Packet::new_ack(SourceRoutingHeader { hop_index: 1, hops: vec![21, 11, 1] }, req.session_id, 0));
+
+        // response
+        let data = web_messages::ResponseMessage::new_text_list_response(
+            21,
+            Compression::None, vec!["file1".to_string(), "file2".to_string()]).fragment().unwrap();
+        assert_eq!(data.len(), 1);
+
+        let _ = d_send.send(Packet::new_fragment(SourceRoutingHeader { hop_index: 1, hops: vec![21, 11, 1] },
+            1 << 50,
+            data[0].clone()
+        ));
+
+        sleep(Duration::from_secs(1));
+        c_event_recv.recv().unwrap();
+
+        assert_eq!(s_recv.recv().unwrap(), Packet{
+            session_id: 1 << 50,
+            routing_header: SourceRoutingHeader { hop_index: 2, hops: vec![1, 11, 21] },
+            pack_type: PacketType::Ack(Ack { fragment_index: 0 })
+        });
+
+        let resp = c_event_recv.recv().unwrap();
+        //println!("--{:?}", resp);
+
+        if let ClientEvent::ListOfFiles(files, id) = resp{
+
+            assert_eq!(files, vec!["file1".to_string(), "file2".to_string()]);
+            assert_eq!(id,21);
         }
-        nodes type: {12: Drone, 1: Client, 11: Drone, 13: Drone}
-        */
+        else {
+            assert!(false)
+        }
     }
 
 }
