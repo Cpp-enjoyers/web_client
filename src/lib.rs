@@ -425,6 +425,14 @@ impl WebBrowser {
         (packet, None)
     }
 
+    // fn check_routing_header(&self, header: &SourceRoutingHeader) -> bool{
+    //     if header.current_hop().is_none_or(|id| id != self.id){
+    //         self.controller_send.send(Cl)
+    //     }
+    // }
+
+    // fn is_my_request(&self, )
+
     fn handle_packet(&mut self, mut packet: Packet) {
         println!("client {} - handling packet: {:?}", self.id, packet);
         match packet.pack_type.clone() {
@@ -681,7 +689,7 @@ impl WebBrowser {
             Response::Text(resp) => {
                 match resp {
                     TextResponse::TextList(vec) => {
-                        println!("sending message to scl");
+                        println!("sending message to scl {{{:?}}}", vec);
                         let _ = self
                             .controller_send
                             .send(ClientEvent::ListOfFiles(vec, req.server_id));

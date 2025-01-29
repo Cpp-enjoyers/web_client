@@ -587,15 +587,6 @@ mod web_client_tests {
                 content: web_messages::Request::Text(TextRequest::TextList)
             }
         );
-        // ACK
-        let _ = d_send.send(Packet::new_ack(
-            SourceRoutingHeader {
-                hop_index: 1,
-                hops: vec![21, 11, 1],
-            },
-            req.session_id,
-            0,
-        ));
 
         // response
         let data = web_messages::ResponseMessage::new_text_list_response(
@@ -605,8 +596,17 @@ mod web_client_tests {
         )
         .fragment()
         .unwrap();
-        assert_eq!(data.len(), 1);
+    assert_eq!(data.len(), 1);
 
+    // ACK (sent later)
+    let _ = d_send.send(Packet::new_ack(
+        SourceRoutingHeader {
+            hop_index: 1,
+            hops: vec![21, 11, 1],
+        },
+        req.session_id,
+        0,
+    ));
         let _ = d_send.send(Packet::new_fragment(
             SourceRoutingHeader {
                 hop_index: 1,
