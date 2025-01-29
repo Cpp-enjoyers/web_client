@@ -66,22 +66,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
-name = "client"
-version = "0.1.0"
-dependencies = [
- "ap2024_unitn_cppenjoyers_drone",
- "bincode",
- "common",
- "compression",
- "crossbeam-channel",
- "petgraph",
- "wg_2024",
-]
-
-[[package]]
 name = "common"
 version = "0.1.0"
-source = "git+https://github.com/Cpp-enjoyers/common.git#c25e5f0d06d89cf5ea10851044fae91f68b12bb9"
+source = "git+https://github.com/Cpp-enjoyers/common.git#5b2c77713da5ecfe5ac5c388169778332cab6ea9"
 dependencies = [
  "bincode",
  "crossbeam-channel",
@@ -367,6 +354,19 @@ name = "wasi"
 version = "0.11.0+wasi-snapshot-preview1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c8d87e72b64a3b4db28d11ce29237c246188f4f51057d65a7eab63b7987e423"
+
+[[package]]
+name = "web_client"
+version = "0.1.0"
+dependencies = [
+ "ap2024_unitn_cppenjoyers_drone",
+ "bincode",
+ "common",
+ "compression",
+ "crossbeam-channel",
+ "petgraph",
+ "wg_2024",
+]
 
 [[package]]
 name = "wg_2024"
