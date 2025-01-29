@@ -149,9 +149,7 @@ impl Fragmentable for ResponseMessage {
     {
         let mut msg: Vec<u8> = vec![];
         for f in v {
-            for i in 0..f.length {
-                msg.push(f.data[i as usize]);
-            }
+            msg.append(&mut f.data.to_vec().clone());
         }
 
         let decompressed = match compr {
