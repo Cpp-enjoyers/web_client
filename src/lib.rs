@@ -187,7 +187,7 @@ struct Request {
     waiting_for_flood: Vec<Packet>, // stores the outgoing fragment for which I couldn't find a path or I received a NACK back instead of ACK
     compression: Compression,
     request_type: RequestType,
-    can_be_closed: bool
+    response_is_complete: bool
 }
 impl Request {
     fn new(
@@ -206,7 +206,7 @@ impl Request {
             waiting_for_flood,
             compression,
             request_type,
-            can_be_closed: false
+            response_is_complete: false
         }
     }
 }
@@ -299,10 +299,12 @@ impl Client for WebBrowser {
 
 
         loop {
-            if let Some(i) = self.pending_requests.iter().position(|req| req.can_be_closed){
+
+            if let Some(i) = self.pending_requests.iter().position(|req| req.response_is_complete && req.waiting_for_ack.is_empty()){
                 let req = self.pending_requests.remove(i);
                 self.complete_request(req);
             }
+
             select! {
                 recv(self.controller_recv) -> command => {
                     if let Ok(command) = command {
@@ -569,9 +571,9 @@ impl WebBrowser {
 
                                     req.incoming_messages.push(fragment.clone());
 
-                                    if req.incoming_messages.len() == n_frags && req.waiting_for_ack.is_empty(){
-                                        // I have all the fragments, it will be handled in the loop
-                                        req.can_be_closed = true;
+                                    if req.incoming_messages.len() == n_frags{
+                                        // I have all the fragments
+                                        req.response_is_complete = true;
                                     }
 
                                     let ack_dest = req.server_id;
