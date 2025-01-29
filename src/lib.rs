@@ -70,7 +70,7 @@ impl Fragmentable for RequestMessage {
                 Err(_) => {
                     let mut ret: [u8; FRAGMENT_DSIZE] = [0; FRAGMENT_DSIZE];
 
-                    ret[..c.len()].copy_from_slice(&c[..]);
+                    ret[..c.len()].copy_from_slice(c);
 
                     ret
                 }
@@ -126,7 +126,7 @@ impl Fragmentable for ResponseMessage {
                 Err(_) => {
                     let mut ret: [u8; FRAGMENT_DSIZE] = [0; FRAGMENT_DSIZE];
 
-                    ret[..c.len()].copy_from_slice(&c[..]);
+                    ret[..c.len()].copy_from_slice(c);
 
                     ret
                 }
@@ -272,9 +272,9 @@ impl Client for WebBrowser {
         packet_send: HashMap<NodeId, Sender<Packet>>,
     ) -> Self {
         let mut initial_edges = vec![];
-        for a in packet_send.keys() {
-            initial_edges.push((id, a.clone()));
-            initial_edges.push((a.clone(), id));
+        for node in packet_send.keys() {
+            initial_edges.push((id, *node));
+            initial_edges.push((*node, id));
         }
 
         Self {
@@ -326,7 +326,10 @@ impl Client for WebBrowser {
 impl WebBrowser {
     fn shortcut(&self, packet: Packet) {
         //packet.routing_header.decrease_hop_index();
-        let _ = self.controller_send.send(ClientEvent::Shortcut(packet));
+        match packet.routing_header.destination(){
+            Some(_) => {self.controller_send.send(ClientEvent::Shortcut(packet));},
+            None => {println!("Client {} - Packet doesn't contain a destination, unable to shortcut, dropping", self.id);},
+        }
     }
 
     fn send_nack(&self, packet: Packet, nack_type: NackType) {
@@ -425,13 +428,25 @@ impl WebBrowser {
         (packet, None)
     }
 
-    // fn check_routing_header(&self, header: &SourceRoutingHeader) -> bool{
-    //     if header.current_hop().is_none_or(|id| id != self.id){
-    //         self.controller_send.send(Cl)
-    //     }
-    // }
+    fn check_routing_header(&self, header: &SourceRoutingHeader) -> Option<NackType>{
+        if header.current_hop().is_none_or(|next_id| next_id != self.id){
+            return Some(NackType::UnexpectedRecipient(self.id));
+        }
 
-    // fn is_my_request(&self, )
+        if header.next_hop().is_none_or(|next_id| next_id != self.id && !self.packet_send.contains_key(&next_id)){
+            return Some(NackType::ErrorInRouting(header.next_hop().unwrap()));
+        }
+
+        None
+    }
+
+    fn client_is_destination(&self, p: &Packet) -> bool{
+        p.routing_header.destination().is_some_and(|dest| dest == self.id)
+    }
+
+    fn find_request_index(&self, p: &Packet) -> Option<usize>{
+        self.pending_requests.iter().position(|req| req.request_id == PacketId::from_u64(p.session_id).get_request_id())
+    }
 
     fn handle_packet(&mut self, mut packet: Packet) {
         println!("client {} - handling packet: {:?}", self.id, packet);
@@ -502,48 +517,25 @@ impl WebBrowser {
             }
 
             PacketType::Ack(ref ack) => {
-                match packet.routing_header.destination() {
-                    Some(id) => {
-                        // I'm the destination of the packet
-                        if id == self.id {
-                            let req_id =
-                                PacketId::from_u64(packet.session_id).get_request_id();
+                if !self.client_is_destination(&packet){
+                    self.shortcut(packet);
+                    return;
+                }
 
-                            match self
-                                .pending_requests
-                                .iter_mut()
-                                .find(|req| req.request_id == req_id)
-                            {
-                                // I recognize this request_id
-                                Some(req) => {
-                                    match req
-                                        .waiting_for_ack
-                                        .iter()
-                                        .position(|e| e.get_fragment_index() == ack.fragment_index)
-                                    {
-                                        Some(idx) => {
-                                            req.waiting_for_ack.remove(idx);
-                                        }
-
-                                        None => {
-                                            println!("client {} - I received an ack for a packet that has already been acknowledged, bug for me or for the sender", self.id);
-                                        }
-                                    }
-                                }
-
-                                None => {
-                                    println!("client {} - I received an ack for an unknown req_id, dropping", self.id);
-                                }
+                match self.find_request_index(&packet) {
+                    Some(id) =>{
+                        let req = self.pending_requests.get_mut(id).unwrap();
+                        match req.waiting_for_ack.iter_mut().position(|e| e.get_fragment_index() == ack.fragment_index){
+                            Some(id) => {
+                                req.waiting_for_ack.remove(id);
+                            }
+                            None => {
+                                println!("client {} - I received an ack for a packet that has already been acknowledged, bug for me or for the sender", self.id);
                             }
                         }
-                        // I'm not the destination of this message, routing error, shortcut needed
-                        else {
-                            self.shortcut(packet);
-                        }
                     }
-                    // bad routing header, dropping
                     None => {
-                        println!("client {} - Ack has a bad rounting header, I could not read the destination... dropping msg", self.id);
+                        println!("client {} - I received an ack for an unknown req_id, dropping", self.id);
                     }
                 }
             }
@@ -551,62 +543,43 @@ impl WebBrowser {
             PacketType::Nack(nack) => {}
 
             PacketType::MsgFragment(fragment) => {
-                match packet.routing_header.destination() {
-                    Some(id) => {
-                        // I'm the destination of the packet
-                        if id == self.id {
-                            let req_id =
-                                PacketId::from_u64(packet.session_id).get_request_id();
+                if !self.client_is_destination(&packet){
+                    self.shortcut(packet);
+                    return;
+                }
 
-                            match self
-                                .pending_requests
-                                .iter_mut()
-                                .find(|req| req.request_id == req_id)
+                match self.find_request_index(&packet) {
+                    Some(id) =>{
+                        let req = self.pending_requests.get_mut(id).unwrap();
+
+                        let n_frags = fragment.total_n_fragments as usize;
+
+                            // check if a fragment has been already received
+                            if req
+                                .incoming_messages
+                                .iter()
+                                .any(|f| f.fragment_index == fragment.fragment_index)
                             {
-                                // I recognize this open request
-                                Some(req) => {
-                                    let n_frags = fragment.total_n_fragments as usize;
-
-                                    // check if a fragment has been already received
-                                    if req
-                                        .incoming_messages
-                                        .iter()
-                                        .any(|f| f.fragment_index == fragment.fragment_index)
-                                    {
-                                        println!("client {} - I received the same fragment multiple times, bug, ignoring the message", self.id);
-                                        unreachable!()
-                                    }
-
-                                    req.incoming_messages.push(fragment.clone());
-
-                                    if req.incoming_messages.len() == n_frags{
-                                        // I have all the fragments
-                                        req.response_is_complete = true;
-                                    }
-
-                                    let ack_dest = req.server_id;
-
-                                    // send ACK to acknowledge the packet
-                                    self.send_ack(
-                                        ack_dest,
-                                        packet.session_id,
-                                        fragment.fragment_index,
-                                    );
-                                }
-
-                                None => {
-                                    println!("client {} - I received a fragment for req_id \"{}\" that it's unknown to me, dropping", self.id, req_id);
-                                }
+                                println!("client {} - I received the same fragment multiple times, bug, ignoring the message", self.id);
                             }
-                        }
-                        // I'm not the destination of this message, unexpected recipient, send nack back
-                        else {
-                            self.send_nack(packet, NackType::UnexpectedRecipient(self.id));
-                        }
+
+                            req.incoming_messages.push(fragment.clone());
+
+                            if req.incoming_messages.len() == n_frags{
+                                // I have all the fragments
+                                req.response_is_complete = true;
+                            }
+
+                            let ack_dest = req.server_id;
+                            // send ACK to acknowledge the packet
+                            self.send_ack(
+                                ack_dest,
+                                packet.session_id,
+                                fragment.fragment_index,
+                            );
                     }
-                    // bad routing header, dropping
                     None => {
-                        println!("client {} - Message has a bad rounting header, I could not read the destination... dropping msg", self.id);
+                        println!("client {} - I received a fragment for req_id \"{}\" that it's unknown to me, dropping", self.id, PacketId::from_u64(packet.session_id).get_request_id());
                     }
                 }
             }
