@@ -865,6 +865,8 @@ impl WebBrowser {
 
         match &request_type {
             RequestType::ListOfFile(server_id) => {
+                self.controller_send.send(ClientEvent::ListOfFiles(vec!["porco".to_string(), " dio".to_string()], *server_id));
+                return;
                 let frags =
                     web_messages::RequestMessage::new_text_list_request(self.id, compression.clone())
                         .fragment()
