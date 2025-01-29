@@ -315,6 +315,8 @@ impl Client for WebBrowser {
     }
 }
 
+
+
 impl WebBrowser {
     fn shortcut(&self, packet: Packet) {
         //packet.routing_header.decrease_hop_index();
@@ -684,7 +686,7 @@ impl WebBrowser {
                         if file.contains("<img>") {
                             todo!()
                             //parsing ...
-                            // ask for media
+                            // create media request
                             // store the file somewhere while waiting for media
                         } else {
                             // TODO maybe send to scl a vec<string> if media are not embedded
@@ -865,8 +867,7 @@ impl WebBrowser {
 
         match &request_type {
             RequestType::ListOfFile(server_id) => {
-                self.controller_send.send(ClientEvent::ListOfFiles(vec!["porco".to_string(), " dio".to_string()], *server_id));
-                return;
+
                 let frags =
                     web_messages::RequestMessage::new_text_list_request(self.id, compression.clone())
                         .fragment()
