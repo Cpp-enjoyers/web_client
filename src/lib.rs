@@ -625,6 +625,7 @@ impl WebBrowser {
     }
 
     fn complete_request(&mut self, mut req: Request) {
+        println!("Client {}, completing req (from: {:?}, {:?}, to: {:?})", self.id, req.request_id, req.request_type, req.server_id);
         req.incoming_messages
             .sort_by(|f1, f2| f1.fragment_index.cmp(&f2.fragment_index));
         let content =
@@ -678,6 +679,7 @@ impl WebBrowser {
             Response::Text(resp) => {
                 match resp {
                     TextResponse::TextList(vec) => {
+                        println!("sending message to scl");
                         let _ = self
                             .controller_send
                             .send(ClientEvent::ListOfFiles(vec, req.server_id));
