@@ -617,6 +617,7 @@ mod web_client_tests {
         ));
 
         sleep(MS500);
+        // ack from client
         c_event_recv.recv().unwrap();
 
         assert_eq!(
@@ -632,7 +633,7 @@ mod web_client_tests {
         );
 
         let resp = c_event_recv.recv().unwrap();
-        //println!("--{:?}", resp);
+        println!("--{:?}", resp);
 
         if let ClientEvent::ListOfFiles(files, id) = resp {
             assert_eq!(files, vec!["file1".to_string(), "file2".to_string()]);
@@ -1024,7 +1025,7 @@ mod web_client_tests {
         }
     }
 
-    
+
 
 }
 

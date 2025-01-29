@@ -187,6 +187,7 @@ struct Request {
     waiting_for_flood: Vec<Packet>, // stores the outgoing fragment for which I couldn't find a path or I received a NACK back instead of ACK
     compression: Compression,
     request_type: RequestType,
+    can_be_closed: bool
 }
 impl Request {
     fn new(
@@ -205,6 +206,7 @@ impl Request {
             waiting_for_flood,
             compression,
             request_type,
+            can_be_closed: false
         }
     }
 }
@@ -293,10 +295,14 @@ impl Client for WebBrowser {
 
     fn run(&mut self) {
         sleep(time::Duration::from_millis(100));
-
         self.start_flooding();
 
+
         loop {
+            if let Some(i) = self.pending_requests.iter().position(|req| req.can_be_closed){
+                let req = self.pending_requests.remove(i);
+                self.complete_request(req);
+            }
             select! {
                 recv(self.controller_recv) -> command => {
                     if let Ok(command) = command {
@@ -510,7 +516,6 @@ impl WebBrowser {
                                         }
 
                                         None => {
-
                                             println!("client {} - I received an ack for a packet that has already been acknowledged, bug for me or for the sender", self.id);
                                         }
                                     }
@@ -540,7 +545,6 @@ impl WebBrowser {
                     Some(id) => {
                         // I'm the destination of the packet
                         if id == self.id {
-                            println!("-----packet id: {}", packet.session_id & 0xffff);
                             let req_id =
                                 PacketId::from_u64(packet.session_id).get_request_id();
 
@@ -565,9 +569,12 @@ impl WebBrowser {
 
                                     req.incoming_messages.push(fragment.clone());
 
+                                    if req.incoming_messages.len() == n_frags && req.waiting_for_ack.is_empty(){
+                                        // I have all the fragments, it will be handled in the loop
+                                        req.can_be_closed = true;
+                                    }
+
                                     let ack_dest = req.server_id;
-                                    let tmp = req.clone();
-                                    let received_frags = req.incoming_messages.len();
 
                                     // send ACK to acknowledge the packet
                                     self.send_ack(
@@ -575,11 +582,6 @@ impl WebBrowser {
                                         packet.session_id,
                                         fragment.fragment_index,
                                     );
-
-                                    if received_frags == n_frags {
-                                        // I have all the fragments
-                                        self.complete_request(tmp);
-                                    }
                                 }
 
                                 None => {
@@ -630,7 +632,7 @@ impl WebBrowser {
 
         if content.is_err() {
             println!("client {} - Cannot deserialize response, dropping", self.id);
-            unreachable!()
+            return;
         }
 
         match content.unwrap().content {
@@ -708,14 +710,6 @@ impl WebBrowser {
                 }
             }
         }
-
-        // the request must exist inside the vector in order to reach this point, unwrap() should be safe
-        self.pending_requests.remove(
-            self.pending_requests
-                .iter()
-                .position(|r| r.request_id == req.request_id)
-                .unwrap(),
-        );
     }
 
     fn send_packet(&self, packet: Packet, channel: &Sender<Packet>) {
