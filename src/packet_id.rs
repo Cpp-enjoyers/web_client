@@ -7,7 +7,7 @@ const REQ_ID_LEN: u8 = 16;
 pub type SessionId = u64;
 pub type RequestId = u16;
 
-#[derive(Debug, Hash)]
+#[derive(Debug, Hash, Clone, PartialEq, Eq)]
 
 /*
     Since NACK doesn't contain the fragment_index I need to store it somewhere

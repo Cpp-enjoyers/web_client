@@ -3,7 +3,7 @@ use core::time;
 use crossbeam_channel::{select, Receiver, Sender};
 use petgraph::algo::astar;
 use petgraph::prelude::DiGraphMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::thread::sleep;
 use wg_2024::network::{NodeId, SourceRoutingHeader};
 use wg_2024::packet::*;
@@ -182,9 +182,8 @@ enum RequestType {
 struct Request {
     request_id: RequestId,
     server_id: NodeId,
-    waiting_for_ack: Vec<Packet>, // stores the outgoing fragments that are still waiting for ACK
+    waiting_for_ack: HashMap<PacketId, Fragment>, // stores the outgoing fragments that are still waiting for ACK
     incoming_messages: Vec<Fragment>, // stores the incoming fragments that compose the response of the query
-    waiting_for_flood: Vec<Packet>, // stores the outgoing fragment for which I couldn't find a path or I received a NACK back instead of ACK
     compression: Compression,
     request_type: RequestType,
     response_is_complete: bool
@@ -193,8 +192,7 @@ impl Request {
     fn new(
         request_id: RequestId,
         server_id: NodeId,
-        waiting_for_ack: Vec<Packet>,
-        waiting_for_flood: Vec<Packet>,
+        waiting_for_ack: HashMap<PacketId, Fragment>,
         compression: Compression,
         request_type: RequestType,
     ) -> Self {
@@ -203,7 +201,6 @@ impl Request {
             server_id,
             waiting_for_ack,
             incoming_messages: vec![],
-            waiting_for_flood,
             compression,
             request_type,
             response_is_complete: false
@@ -224,6 +221,7 @@ pub struct WebBrowser {
     packet_id_counter: PacketId,
     topology_graph: DiGraphMap<NodeId, u64>,
     nodes_type: HashMap<NodeId, GraphNodeType>,
+    waiting_for_flood: VecDeque<(PacketId, Fragment)> // stores the outgoing fragment for which I couldn't find a path or I received a NACK back instead of ACK
 }
 
 impl Flooder for WebBrowser {
@@ -290,6 +288,7 @@ impl Client for WebBrowser {
             packet_id_counter: PacketId::new(),
             topology_graph: DiGraphMap::from_edges(initial_edges),
             nodes_type: HashMap::from([(id, GraphNodeType::Client)]),
+            waiting_for_flood: VecDeque::new(),
         }
     }
 
@@ -299,12 +298,6 @@ impl Client for WebBrowser {
 
 
         loop {
-
-            if let Some(i) = self.pending_requests.iter().position(|req| req.response_is_complete && req.waiting_for_ack.is_empty()){
-                let req = self.pending_requests.remove(i);
-                self.complete_request(req);
-            }
-
             select! {
                 recv(self.controller_recv) -> command => {
                     if let Ok(command) = command {
@@ -316,6 +309,32 @@ impl Client for WebBrowser {
                         self.handle_packet(packet);
                     }
                 },
+            }
+
+            if let Some(i) = self.pending_requests.iter().position(|req| req.response_is_complete && req.waiting_for_ack.is_empty()){
+                let req = self.pending_requests.remove(i);
+                self.complete_request(req);
+            }
+
+            if let Some((id, frag)) = self.waiting_for_flood.pop_front(){
+                match self.pending_requests.iter().find(|req| req.request_id == id.get_request_id()){
+                    Some(req) =>{
+                        let p = Packet::new_fragment(SourceRoutingHeader::empty_route(), id.get_session_id(), frag.clone());
+
+                        let (packet, channel) = self.prepare_packet_routing(p, req.server_id);
+                        if let Some(channel) = channel {
+                            self.send_packet(packet, channel);
+                        }
+                        else {
+                            self.waiting_for_flood.push_back((PacketId::from_u64(packet.session_id), frag));
+                        }
+                    }
+
+                    None => {
+                        println!("client {} - Found a packet in waiting_for_flood without the corresponding request. BUG", self.id);
+                        unreachable!()
+                    }
+                }
             }
         }
     }
@@ -495,7 +514,6 @@ impl WebBrowser {
                         self.id, self.topology_graph, self.nodes_type
                     );
 
-                    //self.try_resend_waiting_for_flood_packets();
                 } else {
                     match packet.routing_header.next_hop() {
                         Some(next_hop_drone_id) => {
@@ -525,13 +543,9 @@ impl WebBrowser {
                 match self.find_request_index(&packet) {
                     Some(id) =>{
                         let req = self.pending_requests.get_mut(id).unwrap();
-                        match req.waiting_for_ack.iter_mut().position(|e| e.get_fragment_index() == ack.fragment_index){
-                            Some(id) => {
-                                req.waiting_for_ack.remove(id);
-                            }
-                            None => {
-                                println!("client {} - I received an ack for a packet that has already been acknowledged, bug for me or for the sender", self.id);
-                            }
+                        if req.waiting_for_ack.remove(&PacketId::from_u64(packet.session_id)).is_none(){
+
+                            println!("client {} - I received an ack {:?} for a packet that has already been acknowledged, bug for me or for the sender", self.id, ack);
                         }
                     }
                     None => {
@@ -540,7 +554,51 @@ impl WebBrowser {
                 }
             }
 
-            PacketType::Nack(nack) => {}
+            PacketType::Nack(nack) => {
+
+                if !self.client_is_destination(&packet){
+                    self.shortcut(packet);
+                    return;
+                }
+
+                match self.find_request_index(&packet) {
+                    Some(id) =>{
+
+                        let req = self.pending_requests.get_mut(id).unwrap();
+
+                        let fragment = match req.waiting_for_ack.get(&PacketId::from_u64(packet.session_id)){
+                            Some(f) => f.clone(),
+                            None => {
+                                println!("client {} - I received a NACK for packet_id \"{}\" that it's unknown to me, dropping", self.id, PacketId::from_u64(packet.session_id).get_packet_id());
+                                return;
+                            }
+                        };
+
+                        match nack.nack_type {
+                            NackType::Dropped => {
+                                // TODO update graph with some metric
+                                let dest = req.server_id;
+                                let p = Packet::new_fragment(SourceRoutingHeader::empty_route(), packet.session_id, fragment.clone());
+                                let (p, opt) = self.prepare_packet_routing(p, dest);
+                                if let Some(channel) = opt {
+                                    self.send_packet(p, channel);
+                                }
+                                else {
+                                    self.waiting_for_flood.push_back((PacketId::from_u64(p.session_id), fragment.clone()));
+                                    self.start_flooding();
+                                }
+                            },
+
+                            _=> todo!()
+                        }
+
+                    }
+                    None => {
+                        println!("client {} - I received a NACK for req_id \"{}\" that it's unknown to me, dropping", self.id, PacketId::from_u64(packet.session_id).get_request_id());
+                    }
+                }
+
+            }
 
             PacketType::MsgFragment(fragment) => {
                 if !self.client_is_destination(&packet){
@@ -782,53 +840,45 @@ impl WebBrowser {
         println!("Adding request");
         let opt = self.source_routing_header_from_graph_search(server_id);
 
-        let mut waiting_for_ack = vec![];
-        let mut waiting_for_flood = vec![];
+        let mut new_request = Request::new(
+            self.packet_id_counter.get_request_id(),
+            server_id,
+            HashMap::new(),
+            compression,
+            request_type,
+        );
 
-        if let Some(routing_header) = opt {
-            let next_hop_id = routing_header
-                .current_hop()
-                .expect("Header created from a valid path is invalid. BUG");
+        for f in frags {
+            let mut p = wg_2024::packet::Packet::new_fragment(
+                SourceRoutingHeader::empty_route(),
+                self.packet_id_counter.get_session_id(),
+                f.clone(),
+            );
+            new_request.waiting_for_ack.insert(self.packet_id_counter.clone(), f.clone());
 
-            let channel = self
-                .packet_send
-                .get(&next_hop_id)
-                .expect("Found inconsistency between graph and list of neighbours, BUG");
+            if let Some(routing_header) = &opt {
+                let next_hop_id = routing_header
+                    .current_hop()
+                    .expect("Header created from a valid path is invalid. BUG");
 
-            for f in frags {
-                let p = wg_2024::packet::Packet::new_fragment(
-                    routing_header.clone(),
-                    self.packet_id_counter.get_session_id(),
-                    f,
-                );
-                waiting_for_ack.push(p.clone());
+                let channel = self
+                    .packet_send
+                    .get(&next_hop_id)
+                    .expect("Found inconsistency between graph and list of neighbours, BUG");
 
+                p.routing_header = routing_header.clone();
                 self.send_packet(p, channel);
-
-                self.packet_id_counter.increment_packet_id();
             }
-        } else {
-            for f in frags {
-                let p = wg_2024::packet::Packet::new_fragment(
-                    SourceRoutingHeader::empty_route(),
-                    self.packet_id_counter.get_session_id(),
-                    f,
-                );
-                waiting_for_flood.push(p.clone());
+            else {
+                self.waiting_for_flood.push_back((self.packet_id_counter.clone(), f));
+                self.start_flooding();
             }
 
             self.packet_id_counter.increment_packet_id();
-            self.start_flooding();
+
         }
 
-        self.pending_requests.push(Request::new(
-            self.packet_id_counter.get_request_id(),
-            server_id,
-            waiting_for_ack,
-            waiting_for_flood,
-            compression,
-            request_type,
-        ));
+        self.pending_requests.push(new_request);
 
         self.packet_id_counter.increment_request_id();
     }

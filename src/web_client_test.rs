@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod web_client_tests {
-    use std::{thread, time::Duration};
+    use std::{thread, time::Duration, vec};
 
     use ap2024_unitn_cppenjoyers_drone::CppEnjoyersDrone;
     use common::Client;
@@ -642,6 +642,440 @@ mod web_client_tests {
             assert!(false)
         }
     }
+
+    #[test]
+    pub fn file_list_request_with_nack_dropped() {
+        // client 1 <--> 11 <--> 21 server
+
+        // Client 1 channels
+        let (c_send, c_recv) = unbounded();
+        // Drone 11
+        let (d_send, d_recv) = unbounded();
+        // SC - needed to not make the drone crash
+        let (_d_command_send, d_command_recv) = unbounded();
+        let (c_event_send, c_event_recv) = unbounded();
+        let (c_command_send, c_command_recv) = unbounded();
+        // Server
+        let (s_send, s_recv) = unbounded();
+
+        // Drone 11
+        let neighbours11 = HashMap::from([(1, c_send.clone()), (21, s_send.clone())]);
+        let mut drone = CppEnjoyersDrone::new(
+            11,
+            unbounded().0,
+            d_command_recv.clone(),
+            d_recv.clone(),
+            neighbours11,
+            0.0,
+        );
+
+        // client 1
+        let neighbours1 = HashMap::from([(11, d_send.clone())]);
+        let mut client1 = WebBrowser::new(
+            1,
+            c_event_send.clone(),
+            c_command_recv,
+            c_recv.clone(),
+            neighbours1,
+        );
+
+        thread::spawn(move || {
+            drone.run();
+        });
+
+        sleep(MS500);
+
+        thread::spawn(move || {
+            client1.run();
+        });
+
+        sleep(MS500);
+        c_event_recv.recv().unwrap();
+
+        let _flood_request = s_recv.recv().unwrap();
+        let flood_response = Packet::new_flood_response(
+            SourceRoutingHeader {
+                hop_index: 1,
+                hops: vec![21, 11, 1],
+            },
+            0,
+            FloodResponse {
+                flood_id: 0,
+                path_trace: vec![
+                    (1, NodeType::Client),
+                    (11, NodeType::Drone),
+                    (21, NodeType::Server),
+                ],
+            },
+        );
+
+        let _ = d_send.send(flood_response);
+
+        sleep(MS500);
+
+        let _ = c_command_send.send(ClientCommand::AskListOfFiles(21));
+
+        // receive request
+        //println!("{:?}", req);
+        let req = s_recv.recv().unwrap();
+        let mut data = Vec::new();
+        match req.pack_type {
+            PacketType::MsgFragment(f) => data.push(f),
+            _ => {}
+        };
+        let req_defrag = RequestMessage::defragment(&data, Compression::None).unwrap();
+        c_event_recv.recv().unwrap();
+
+        assert_eq!(
+            req_defrag,
+            RequestMessage {
+                compression_type: Compression::None,
+                source_id: 1,
+                content: web_messages::Request::Text(TextRequest::TextList)
+            }
+        );
+
+        // NACK (dropped)
+        let nack = Packet::new_nack(SourceRoutingHeader{
+            hop_index: 1,
+            hops: vec![21, 11, 1]
+        }, req.session_id, Nack { fragment_index: 0, nack_type: NackType::Dropped });
+        let _ = d_send.send(nack).unwrap();
+
+        // receive request second time
+        //println!("{:?}", req);
+        let req = s_recv.recv().unwrap();
+        let mut data = Vec::new();
+        match req.pack_type {
+            PacketType::MsgFragment(f) => data.push(f),
+            _ => {}
+        };
+        let req_defrag = RequestMessage::defragment(&data, Compression::None).unwrap();
+        c_event_recv.recv().unwrap();
+
+        assert_eq!(
+            req_defrag,
+            RequestMessage {
+                compression_type: Compression::None,
+                source_id: 1,
+                content: web_messages::Request::Text(TextRequest::TextList)
+            }
+        );
+
+        // response after nack
+        let data = web_messages::ResponseMessage::new_text_list_response(
+            21,
+            Compression::None,
+            vec!["file1".to_string(), "file2".to_string()],
+        )
+        .fragment()
+        .unwrap();
+        assert_eq!(data.len(), 1);
+
+        // ACK (sent later)
+        let _ = d_send.send(Packet::new_ack(
+            SourceRoutingHeader {
+                hop_index: 1,
+                hops: vec![21, 11, 1],
+            },
+            req.session_id,
+            0,
+        ));
+        let _ = d_send.send(Packet::new_fragment(
+            SourceRoutingHeader {
+                hop_index: 1,
+                hops: vec![21, 11, 1],
+            },
+            1 << 50,
+            data[0].clone(),
+        ));
+
+        sleep(MS500);
+        // ack from client
+        c_event_recv.recv().unwrap();
+
+        assert_eq!(
+            s_recv.recv().unwrap(),
+            Packet {
+                session_id: 1 << 50,
+                routing_header: SourceRoutingHeader {
+                    hop_index: 2,
+                    hops: vec![1, 11, 21]
+                },
+                pack_type: PacketType::Ack(Ack { fragment_index: 0 })
+            }
+        );
+
+        let resp = c_event_recv.recv().unwrap();
+        println!("--{:?}", resp);
+
+        if let ClientEvent::ListOfFiles(files, id) = resp {
+            assert_eq!(files, vec!["file1".to_string(), "file2".to_string()]);
+            assert_eq!(id, 21);
+        } else {
+            assert!(false)
+        }
+    }
+
+    #[test]
+    pub fn file_request_with_4_nack_dropped() {
+        // client 1 <--> 11 <--> 21 server
+
+        // Client 1 channels
+        let (c_send, c_recv) = unbounded();
+        // Drone 11
+        let (d_send, d_recv) = unbounded();
+        // SC - needed to not make the drone crash
+        let (_d_command_send, d_command_recv) = unbounded();
+        let (c_event_send, c_event_recv) = unbounded();
+        let (c_command_send, c_command_recv) = unbounded();
+        // Server
+        let (s_send, s_recv) = unbounded();
+
+        // Drone 11
+        let neighbours11 = HashMap::from([(1, c_send.clone()), (21, s_send.clone())]);
+        let mut drone = CppEnjoyersDrone::new(
+            11,
+            unbounded().0,
+            d_command_recv.clone(),
+            d_recv.clone(),
+            neighbours11,
+            0.0,
+        );
+
+        // client 1
+        let neighbours1 = HashMap::from([(11, d_send.clone())]);
+        let mut client1 = WebBrowser::new(
+            1,
+            c_event_send.clone(),
+            c_command_recv,
+            c_recv.clone(),
+            neighbours1,
+        );
+
+        thread::spawn(move || {
+            drone.run();
+        });
+
+        sleep(MS500);
+
+        thread::spawn(move || {
+            client1.run();
+        });
+
+        sleep(MS500);
+        c_event_recv.recv().unwrap();
+
+        let _flood_request = s_recv.recv().unwrap();
+        let flood_response = Packet::new_flood_response(
+            SourceRoutingHeader {
+                hop_index: 1,
+                hops: vec![21, 11, 1],
+            },
+            0,
+            FloodResponse {
+                flood_id: 0,
+                path_trace: vec![
+                    (1, NodeType::Client),
+                    (11, NodeType::Drone),
+                    (21, NodeType::Server),
+                ],
+            },
+        );
+
+        let _ = d_send.send(flood_response);
+
+        sleep(MS500);
+
+        let _ = c_command_send.send(ClientCommand::AskListOfFiles(21));
+
+        // receive request
+        //println!("{:?}", req);
+        let req = s_recv.recv().unwrap();
+        let mut data = Vec::new();
+        match req.pack_type {
+            PacketType::MsgFragment(f) => data.push(f),
+            _ => {}
+        };
+        let req_defrag = RequestMessage::defragment(&data, Compression::None).unwrap();
+        c_event_recv.recv().unwrap();
+
+        assert_eq!(
+            req_defrag,
+            RequestMessage {
+                compression_type: Compression::None,
+                source_id: 1,
+                content: web_messages::Request::Text(TextRequest::TextList)
+            }
+        );
+
+        // --------
+
+        // NACK 1 (dropped)
+        let nack = Packet::new_nack(SourceRoutingHeader{
+            hop_index: 1,
+            hops: vec![21, 11, 1]
+        }, req.session_id, Nack { fragment_index: 0, nack_type: NackType::Dropped });
+        let _ = d_send.send(nack).unwrap();
+        // receive request second time
+        //println!("{:?}", req);
+        let req = s_recv.recv().unwrap();
+        let mut data = Vec::new();
+        match req.pack_type {
+            PacketType::MsgFragment(f) => data.push(f),
+            _ => {}
+        };
+        let req_defrag = RequestMessage::defragment(&data, Compression::None).unwrap();
+        c_event_recv.recv().unwrap();
+
+        assert_eq!(
+            req_defrag,
+            RequestMessage {
+                compression_type: Compression::None,
+                source_id: 1,
+                content: web_messages::Request::Text(TextRequest::TextList)
+            }
+        );
+
+        // --------
+
+        // NACK 2 (dropped)
+        let nack = Packet::new_nack(SourceRoutingHeader{
+            hop_index: 1,
+            hops: vec![21, 11, 1]
+        }, req.session_id, Nack { fragment_index: 0, nack_type: NackType::Dropped });
+        let _ = d_send.send(nack).unwrap();
+        // receive request third time
+        //println!("{:?}", req);
+        let req = s_recv.recv().unwrap();
+        let mut data = Vec::new();
+        match req.pack_type {
+            PacketType::MsgFragment(f) => data.push(f),
+            _ => {}
+        };
+        let req_defrag = RequestMessage::defragment(&data, Compression::None).unwrap();
+        c_event_recv.recv().unwrap();
+
+        assert_eq!(
+            req_defrag,
+            RequestMessage {
+                compression_type: Compression::None,
+                source_id: 1,
+                content: web_messages::Request::Text(TextRequest::TextList)
+            }
+        );
+
+        // --------
+
+        // NACK 3 (dropped)
+        let nack = Packet::new_nack(SourceRoutingHeader{
+            hop_index: 1,
+            hops: vec![21, 11, 1]
+        }, req.session_id, Nack { fragment_index: 0, nack_type: NackType::Dropped });
+        let _ = d_send.send(nack).unwrap();
+        // receive request fourth time
+        //println!("{:?}", req);
+        let req = s_recv.recv().unwrap();
+        let mut data = Vec::new();
+        match req.pack_type {
+            PacketType::MsgFragment(f) => data.push(f),
+            _ => {}
+        };
+        let req_defrag = RequestMessage::defragment(&data, Compression::None).unwrap();
+        c_event_recv.recv().unwrap();
+
+        assert_eq!(
+            req_defrag,
+            RequestMessage {
+                compression_type: Compression::None,
+                source_id: 1,
+                content: web_messages::Request::Text(TextRequest::TextList)
+            }
+        );
+
+        // --------
+
+        // NACK 4 (dropped)
+        let nack = Packet::new_nack(SourceRoutingHeader{
+            hop_index: 1,
+            hops: vec![21, 11, 1]
+        }, req.session_id, Nack { fragment_index: 0, nack_type: NackType::Dropped });
+        let _ = d_send.send(nack).unwrap();
+        // receive request fifth time
+        //println!("{:?}", req);
+        let req = s_recv.recv().unwrap();
+        let mut data = Vec::new();
+        match req.pack_type {
+            PacketType::MsgFragment(f) => data.push(f),
+            _ => {}
+        };
+        let req_defrag = RequestMessage::defragment(&data, Compression::None).unwrap();
+        c_event_recv.recv().unwrap();
+
+        assert_eq!(
+            req_defrag,
+            RequestMessage {
+                compression_type: Compression::None,
+                source_id: 1,
+                content: web_messages::Request::Text(TextRequest::TextList)
+            }
+        );
+
+        // response after nack
+        let data = web_messages::ResponseMessage::new_text_list_response(
+            21,
+            Compression::None,
+            vec!["file1".to_string(), "file2".to_string()],
+        )
+        .fragment()
+        .unwrap();
+        assert_eq!(data.len(), 1);
+
+        // ACK (sent later)
+        let _ = d_send.send(Packet::new_ack(
+            SourceRoutingHeader {
+                hop_index: 1,
+                hops: vec![21, 11, 1],
+            },
+            req.session_id,
+            0,
+        ));
+        let _ = d_send.send(Packet::new_fragment(
+            SourceRoutingHeader {
+                hop_index: 1,
+                hops: vec![21, 11, 1],
+            },
+            1 << 50,
+            data[0].clone(),
+        ));
+
+        sleep(MS500);
+        // ack from client
+        c_event_recv.recv().unwrap();
+
+        assert_eq!(
+            s_recv.recv().unwrap(),
+            Packet {
+                session_id: 1 << 50,
+                routing_header: SourceRoutingHeader {
+                    hop_index: 2,
+                    hops: vec![1, 11, 21]
+                },
+                pack_type: PacketType::Ack(Ack { fragment_index: 0 })
+            }
+        );
+
+        let resp = c_event_recv.recv().unwrap();
+        println!("--{:?}", resp);
+
+        if let ClientEvent::ListOfFiles(files, id) = resp {
+            assert_eq!(files, vec!["file1".to_string(), "file2".to_string()]);
+            assert_eq!(id, 21);
+        } else {
+            assert!(false)
+        }
+    }
+
 
     #[test]
     pub fn server_type_request() {
