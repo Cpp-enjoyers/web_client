@@ -58,19 +58,18 @@ impl PacketId {
 }
 
 #[cfg(test)]
-mod packet_id_test{
+mod packet_id_test {
     use super::PacketId;
 
-
     #[test]
-    fn test_from_64(){
+    fn test_from_64() {
         let v = PacketId::from_u64(0x1234_5678_90AB_CDEF);
         assert_eq!(v.req_id, 0xCDEF);
         assert_eq!(v.packet_id, 0x0000_1234_5678_90AB);
     }
 
     #[test]
-    fn test_getters(){
+    fn test_getters() {
         let v = PacketId::from_u64(0x1234_5678_90AB_CDEF);
         assert_eq!(v.get_request_id(), 0xCDEF);
         assert_eq!(v.get_packet_id(), 0x0000_1234_5678_90AB);
@@ -78,7 +77,7 @@ mod packet_id_test{
     }
 
     #[test]
-    fn test_increment_packet(){
+    fn test_increment_packet() {
         let mut v = PacketId::from_u64(0x1234_5678_90AB_CDEF);
         v.increment_packet_id();
         assert_eq!(v.get_packet_id(), 0x0000_1234_5678_90AC);
@@ -86,7 +85,7 @@ mod packet_id_test{
     }
 
     #[test]
-    fn test_increment_req(){
+    fn test_increment_req() {
         let mut v = PacketId::from_u64(0x1234_5678_90AB_CDEF);
         v.increment_request_id();
         assert_eq!(v.get_request_id(), 0xCDF0);
@@ -94,7 +93,7 @@ mod packet_id_test{
     }
 
     #[test]
-    fn test_increments_overflow(){
+    fn test_increments_overflow() {
         let mut v = PacketId::from_u64(0xFFFF_FFFF_FFFF_FFFF);
         v.increment_packet_id();
         assert_eq!(v.get_packet_id(), 0);

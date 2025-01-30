@@ -93,17 +93,17 @@ impl Fragmentable for RequestMessage {
     {
         let mut msg: Vec<u8> = vec![];
         for f in v {
-            for i in 0..f.length {
-                msg.push(f.data[i as usize]);
-            }
+            msg.append(&mut f.data.to_vec().clone());
         }
 
         let decompressed = match compr {
             Compression::LZW => {
                 let compressed = <Vec<u16>>::deserialize(msg)?;
+
                 LZWCompressor::new()
                     .decompress(compressed)
-                    .map_err(|_| SerializationError)?
+                    .map_err(|e| {println!("{e}");SerializationError})?
+
             }
 
             Compression::None => msg,
@@ -177,7 +177,6 @@ enum RequestType {
     MediaRequest(String, NodeId),
 }
 
-
 #[derive(Debug, Clone)]
 struct Request {
     request_id: RequestId,
@@ -186,7 +185,7 @@ struct Request {
     incoming_messages: Vec<Fragment>, // stores the incoming fragments that compose the response of the query
     compression: Compression,
     request_type: RequestType,
-    response_is_complete: bool
+    response_is_complete: bool,
 }
 impl Request {
     fn new(
@@ -203,7 +202,7 @@ impl Request {
             incoming_messages: vec![],
             compression,
             request_type,
-            response_is_complete: false
+            response_is_complete: false,
         }
     }
 }
@@ -221,7 +220,7 @@ pub struct WebBrowser {
     packet_id_counter: PacketId,
     topology_graph: DiGraphMap<NodeId, u64>,
     nodes_type: HashMap<NodeId, GraphNodeType>,
-    waiting_for_flood: VecDeque<(PacketId, Fragment)> // stores the outgoing fragment for which I couldn't find a path or I received a NACK back instead of ACK
+    waiting_for_flood: VecDeque<(PacketId, Fragment)>, // stores the outgoing fragment for which I couldn't find a path or I received a NACK back instead of ACK
 }
 
 impl Flooder for WebBrowser {
@@ -296,8 +295,50 @@ impl Client for WebBrowser {
         sleep(time::Duration::from_millis(100));
         self.start_flooding();
 
-
         loop {
+
+            if let Some(i) = self
+                .pending_requests
+                .iter()
+                .position(|req| req.response_is_complete && req.waiting_for_ack.is_empty())
+            {
+                let req = self.pending_requests.remove(i);
+                self.complete_request(req);
+            }
+
+            if let Some((id, frag)) = self.waiting_for_flood.pop_front() {
+                match self
+                    .pending_requests
+                    .iter()
+                    .find(|req| req.request_id == id.get_request_id())
+                {
+                    Some(req) => {
+                        let p = Packet::new_fragment(
+                            SourceRoutingHeader::empty_route(),
+                            id.get_session_id(),
+                            frag.clone(),
+                        );
+
+                        let (packet, channel) = self.prepare_packet_routing(p, req.server_id);
+                        if let Some(channel) = channel {
+                            self.send_packet(packet, channel);
+                            continue;
+                        } else {
+                            println!("else");
+                            self.waiting_for_flood
+                                .push_back((PacketId::from_u64(packet.session_id), frag));
+                        }
+                    }
+
+                    None => {
+                        println!("client {} - Found a packet in waiting_for_flood without the corresponding request. BUG", self.id);
+                        unreachable!()
+                    }
+                }
+            }
+
+
+
             select! {
                 recv(self.controller_recv) -> command => {
                     if let Ok(command) = command {
@@ -311,43 +352,31 @@ impl Client for WebBrowser {
                 },
             }
 
-            if let Some(i) = self.pending_requests.iter().position(|req| req.response_is_complete && req.waiting_for_ack.is_empty()){
-                let req = self.pending_requests.remove(i);
-                self.complete_request(req);
-            }
 
-            if let Some((id, frag)) = self.waiting_for_flood.pop_front(){
-                match self.pending_requests.iter().find(|req| req.request_id == id.get_request_id()){
-                    Some(req) =>{
-                        let p = Packet::new_fragment(SourceRoutingHeader::empty_route(), id.get_session_id(), frag.clone());
-
-                        let (packet, channel) = self.prepare_packet_routing(p, req.server_id);
-                        if let Some(channel) = channel {
-                            self.send_packet(packet, channel);
-                        }
-                        else {
-                            self.waiting_for_flood.push_back((PacketId::from_u64(packet.session_id), frag));
-                        }
-                    }
-
-                    None => {
-                        println!("client {} - Found a packet in waiting_for_flood without the corresponding request. BUG", self.id);
-                        unreachable!()
-                    }
-                }
-            }
         }
     }
 }
 
-
-
 impl WebBrowser {
     fn shortcut(&self, packet: Packet) {
         //packet.routing_header.decrease_hop_index();
-        match packet.routing_header.destination(){
-            Some(_) => {self.controller_send.send(ClientEvent::Shortcut(packet));},
-            None => {println!("Client {} - Packet doesn't contain a destination, unable to shortcut, dropping", self.id);},
+        match packet.routing_header.destination() {
+            Some(_) => {
+                self.controller_send.send(ClientEvent::Shortcut(packet));
+            }
+            None => {
+                println!("Client {} - Packet doesn't contain a destination, unable to shortcut, dropping", self.id);
+            }
+        }
+    }
+
+    fn send_packet(&self, packet: Packet, channel: &Sender<Packet>) {
+        let _ = self
+            .controller_send
+            .send(ClientEvent::PacketSent(packet.clone()));
+        match channel.send(packet.clone()) {
+            Ok(()) => println!("client {} - sent {:?}", self.id, packet.clone()),
+            Err(e) => println!("client {} - {e}", self.id),
         }
     }
 
@@ -416,6 +445,24 @@ impl WebBrowser {
         }
     }
 
+    fn source_routing_header_from_graph_search(&self, dest: NodeId) -> Option<SourceRoutingHeader> {
+        // TODO change edge cost when present in the graph
+        astar(
+            &self.topology_graph,
+            self.id,
+            |n| n == dest,
+            |(_, _, weight)| *weight,
+            |_| 0,
+        )
+        .map(|(_, path)| wg_2024::network::SourceRoutingHeader::with_first_hop(path))
+    }
+
+    fn is_correct_server_type(&self, server_id: NodeId, requested_type: GraphNodeType) -> bool {
+        self.nodes_type
+            .get(&server_id)
+            .is_some_and(|t| *t == requested_type)
+    }
+
     /*
        Given a packet, id and destination it search for a path in the graph and returns
        an updated packet and an optional channel.
@@ -447,27 +494,165 @@ impl WebBrowser {
         (packet, None)
     }
 
-    fn check_routing_header(&self, header: &SourceRoutingHeader) -> Option<NackType>{
-        if header.current_hop().is_none_or(|next_id| next_id != self.id){
+    fn check_routing_header(&self, header: &SourceRoutingHeader) -> Option<NackType> {
+        if header
+            .current_hop()
+            .is_none_or(|next_id| next_id != self.id)
+        {
             return Some(NackType::UnexpectedRecipient(self.id));
         }
 
-        if header.next_hop().is_none_or(|next_id| next_id != self.id && !self.packet_send.contains_key(&next_id)){
+        if header
+            .next_hop()
+            .is_none_or(|next_id| next_id != self.id && !self.packet_send.contains_key(&next_id))
+        {
             return Some(NackType::ErrorInRouting(header.next_hop().unwrap()));
         }
 
         None
     }
 
-    fn client_is_destination(&self, p: &Packet) -> bool{
-        p.routing_header.destination().is_some_and(|dest| dest == self.id)
+    fn client_is_destination(&self, p: &Packet) -> bool {
+        p.routing_header
+            .destination()
+            .is_some_and(|dest| dest == self.id)
     }
 
-    fn find_request_index(&self, p: &Packet) -> Option<usize>{
-        self.pending_requests.iter().position(|req| req.request_id == PacketId::from_u64(p.session_id).get_request_id())
+    fn find_request_index(&self, p: &Packet) -> Option<usize> {
+        self.pending_requests
+            .iter()
+            .position(|req| req.request_id == PacketId::from_u64(p.session_id).get_request_id())
     }
 
-    fn handle_packet(&mut self, mut packet: Packet) {
+    fn handle_flood_response(&mut self, mut packet: Packet, resp: &FloodResponse) {
+        let initiator: Option<&(NodeId, NodeType)> = resp.path_trace.first();
+
+        if initiator.is_none() {
+            println!(
+                "client {} - Received a flood response with empty path trace, dropping",
+                self.id
+            );
+            return;
+        }
+
+        if initiator.unwrap().0 == self.id {
+            let mut prev: Option<(NodeId, NodeType)> = None;
+            for (id, node_type) in &resp.path_trace {
+                if let Some((from_id, from_type)) = prev {
+                    if *id == self.id || from_id == self.id{
+                        self.topology_graph.add_edge(from_id, *id, 1);
+                        self.topology_graph.add_edge(*id, from_id, 1);
+                    }
+                    else{
+                        // this prevents A* to find path with client/server in the middle
+                        if matches!(from_type, NodeType::Client) | matches!(from_type, NodeType::Server) {
+                            self.topology_graph.add_edge(*id, from_id, 1);
+                        } else if matches!(node_type, NodeType::Client)
+                            | matches!(node_type, NodeType::Server)
+                        {
+                            self.topology_graph.add_edge(from_id, *id, 1);
+                        } else {
+                            self.topology_graph.add_edge(from_id, *id, 1);
+                            self.topology_graph.add_edge(*id, from_id, 1);
+                        }
+                    }
+
+                    self.nodes_type
+                        .insert(*id, GraphNodeType::from_node_type(*node_type));
+                }
+                prev = Some((*id, *node_type));
+            }
+
+            println!(
+                "client: {} - graph: {:?} - nodes type: {:?}",
+                self.id, self.topology_graph, self.nodes_type
+            );
+        } else {
+            match packet.routing_header.next_hop() {
+                Some(next_hop_drone_id) => {
+                    if let Some(channel) = self.packet_send.get(&next_hop_drone_id) {
+                        packet.routing_header.increase_hop_index();
+                        self.send_packet(packet, channel);
+                    } else {
+                        // I don't have the channel to forward the packet - SHORTCUT
+                        self.shortcut(packet);
+                    }
+                }
+
+                None => {
+                    println!("client {} - Found a flood response with a corrupted routing header, I don't know who is the next hop nor, consequently, the original initiator to short shortcut this packet. Dropping", self.id);
+                    unreachable!()
+                }
+            }
+        }
+    }
+
+    fn handle_ack(&mut self, packet: Packet, ack: &Ack) {
+        if !self.client_is_destination(&packet) {
+            self.shortcut(packet);
+            return;
+        }
+
+        match self.find_request_index(&packet) {
+            Some(id) => {
+                let req = self.pending_requests.get_mut(id).unwrap();
+                if req
+                    .waiting_for_ack
+                    .remove(&PacketId::from_u64(packet.session_id))
+                    .is_none()
+                {
+                    println!("client {} - I received an ack {:?} for a packet that has already been acknowledged, bug for me or for the sender", self.id, ack);
+                }
+            }
+            None => {
+                println!(
+                    "client {} - I received an ack for an unknown req_id, dropping",
+                    self.id
+                );
+            }
+        }
+    }
+
+    fn handle_fragment(&mut self, packet: Packet, fragment: Fragment) {
+        if !self.client_is_destination(&packet) {
+            self.shortcut(packet);
+            return;
+        }
+
+        match self.find_request_index(&packet) {
+            Some(id) => {
+                let req = self.pending_requests.get_mut(id).unwrap();
+
+                let n_frags = fragment.total_n_fragments as usize;
+
+                // check if a fragment has been already received
+                if req
+                    .incoming_messages
+                    .iter()
+                    .any(|f| f.fragment_index == fragment.fragment_index)
+                {
+                    println!("client {} - I received the same fragment multiple times, bug, ignoring the message", self.id);
+                    return;
+                }
+
+                req.incoming_messages.push(fragment.clone());
+
+                if req.incoming_messages.len() == n_frags {
+                    // I have all the fragments
+                    req.response_is_complete = true;
+                }
+
+                let ack_dest = req.server_id;
+                // send ACK to acknowledge the packet
+                self.send_ack(ack_dest, packet.session_id, fragment.fragment_index);
+            }
+            None => {
+                println!("client {} - I received a fragment for req_id \"{}\" that it's unknown to me, dropping", self.id, PacketId::from_u64(packet.session_id).get_request_id());
+            }
+        }
+    }
+
+    fn handle_packet(&mut self, packet: Packet) {
         println!("client {} - handling packet: {:?}", self.id, packet);
         match packet.pack_type.clone() {
             PacketType::FloodRequest(mut req) => {
@@ -476,97 +661,27 @@ impl WebBrowser {
             }
 
             PacketType::FloodResponse(ref resp) => {
-                let initiator: Option<&(NodeId, NodeType)> = resp.path_trace.first();
-
-                if initiator.is_none() {
-                    println!(
-                        "client {} - Received a flood response with empty path trace, dropping",
-                        self.id
-                    );
-                    return;
-                }
-
-                if initiator.unwrap().0 == self.id {
-                    let mut prev: Option<(NodeId, NodeType)> = None;
-                    for (id, node_type) in &resp.path_trace {
-                        if let Some(from) = prev {
-                            // this prevents A* to find path with client/server in the middle
-                            if matches!(from.1, NodeType::Client)
-                                | matches!(from.1, NodeType::Server)
-                            {
-                                self.topology_graph.add_edge(*id, from.0, 1);
-                            } else if matches!(node_type, NodeType::Client)
-                                | matches!(node_type, NodeType::Server)
-                            {
-                                self.topology_graph.add_edge(from.0, *id, 1);
-                            } else {
-                                self.topology_graph.add_edge(from.0, *id, 1);
-                                self.topology_graph.add_edge(*id, from.0, 1);
-                            }
-                            self.nodes_type
-                                .insert(*id, GraphNodeType::from_node_type(*node_type));
-                        }
-                        prev = Some((*id, *node_type));
-                    }
-
-                    println!(
-                        "client: {} - graph: {:?} - nodes type: {:?}",
-                        self.id, self.topology_graph, self.nodes_type
-                    );
-
-                } else {
-                    match packet.routing_header.next_hop() {
-                        Some(next_hop_drone_id) => {
-                            if let Some(channel) = self.packet_send.get(&next_hop_drone_id) {
-                                packet.routing_header.increase_hop_index();
-                                self.send_packet(packet, channel);
-                            } else {
-                                // I don't have the channel to forward the packet - SHORTCUT
-                                self.shortcut(packet);
-                            }
-                        }
-
-                        None => {
-                            println!("client {} - Found a flood response with a corrupted routing header, I don't know who is the next hop nor, consequently, the original initiator to short shortcut this packet. Dropping", self.id);
-                            unreachable!()
-                        }
-                    }
-                }
+                self.handle_flood_response(packet, resp);
             }
 
             PacketType::Ack(ref ack) => {
-                if !self.client_is_destination(&packet){
-                    self.shortcut(packet);
-                    return;
-                }
-
-                match self.find_request_index(&packet) {
-                    Some(id) =>{
-                        let req = self.pending_requests.get_mut(id).unwrap();
-                        if req.waiting_for_ack.remove(&PacketId::from_u64(packet.session_id)).is_none(){
-
-                            println!("client {} - I received an ack {:?} for a packet that has already been acknowledged, bug for me or for the sender", self.id, ack);
-                        }
-                    }
-                    None => {
-                        println!("client {} - I received an ack for an unknown req_id, dropping", self.id);
-                    }
-                }
+                self.handle_ack(packet, ack);
             }
 
             PacketType::Nack(nack) => {
-
-                if !self.client_is_destination(&packet){
+                if !self.client_is_destination(&packet) {
                     self.shortcut(packet);
                     return;
                 }
 
                 match self.find_request_index(&packet) {
-                    Some(id) =>{
-
+                    Some(id) => {
                         let req = self.pending_requests.get_mut(id).unwrap();
 
-                        let fragment = match req.waiting_for_ack.get(&PacketId::from_u64(packet.session_id)){
+                        let fragment = match req
+                            .waiting_for_ack
+                            .get(&PacketId::from_u64(packet.session_id))
+                        {
                             Some(f) => f.clone(),
                             None => {
                                 println!("client {} - I received a NACK for packet_id \"{}\" that it's unknown to me, dropping", self.id, PacketId::from_u64(packet.session_id).get_packet_id());
@@ -575,71 +690,58 @@ impl WebBrowser {
                         };
 
                         match nack.nack_type {
-                            NackType::Dropped => {
+                            NackType::Dropped | NackType::DestinationIsDrone=> {
                                 // TODO update graph with some metric
                                 let dest = req.server_id;
-                                let p = Packet::new_fragment(SourceRoutingHeader::empty_route(), packet.session_id, fragment.clone());
-                                let (p, opt) = self.prepare_packet_routing(p, dest);
-                                if let Some(channel) = opt {
-                                    self.send_packet(p, channel);
-                                }
-                                else {
-                                    self.waiting_for_flood.push_back((PacketId::from_u64(p.session_id), fragment.clone()));
+                                let p = Packet::new_fragment(
+                                    SourceRoutingHeader::empty_route(),
+                                    packet.session_id,
+                                    fragment.clone(),
+                                );
+
+                                if let (packet, Some(channel)) = self.prepare_packet_routing(p, dest) {
+                                    self.send_packet(packet, channel);
+                                } else {
+                                    self.waiting_for_flood.push_back((
+                                        PacketId::from_u64(packet.session_id),
+                                        fragment.clone(),
+                                    ));
                                     self.start_flooding();
                                 }
-                            },
+                            }
 
-                            _=> todo!()
+                            NackType::ErrorInRouting(node_to_remove)
+                            | NackType::UnexpectedRecipient(node_to_remove) => {
+                                // remove problematic drone and search for a new path, if found send. otherwise start a flood
+                                self.topology_graph.remove_node(node_to_remove);
+
+                                // TODO update graph with some metric
+                                let dest = req.server_id;
+                                let p = Packet::new_fragment(
+                                    SourceRoutingHeader::empty_route(),
+                                    packet.session_id,
+                                    fragment.clone(),
+                                );
+                                if let (packet, Some(channel)) = self.prepare_packet_routing(p, dest){
+                                    self.send_packet(packet, channel);
+                                } else {
+                                    self.waiting_for_flood.push_back((
+                                        PacketId::from_u64(packet.session_id),
+                                        fragment.clone(),
+                                    ));
+                                    self.start_flooding();
+                                }
+                            }
                         }
-
                     }
                     None => {
                         println!("client {} - I received a NACK for req_id \"{}\" that it's unknown to me, dropping", self.id, PacketId::from_u64(packet.session_id).get_request_id());
                     }
                 }
-
             }
 
             PacketType::MsgFragment(fragment) => {
-                if !self.client_is_destination(&packet){
-                    self.shortcut(packet);
-                    return;
-                }
-
-                match self.find_request_index(&packet) {
-                    Some(id) =>{
-                        let req = self.pending_requests.get_mut(id).unwrap();
-
-                        let n_frags = fragment.total_n_fragments as usize;
-
-                            // check if a fragment has been already received
-                            if req
-                                .incoming_messages
-                                .iter()
-                                .any(|f| f.fragment_index == fragment.fragment_index)
-                            {
-                                println!("client {} - I received the same fragment multiple times, bug, ignoring the message", self.id);
-                            }
-
-                            req.incoming_messages.push(fragment.clone());
-
-                            if req.incoming_messages.len() == n_frags{
-                                // I have all the fragments
-                                req.response_is_complete = true;
-                            }
-
-                            let ack_dest = req.server_id;
-                            // send ACK to acknowledge the packet
-                            self.send_ack(
-                                ack_dest,
-                                packet.session_id,
-                                fragment.fragment_index,
-                            );
-                    }
-                    None => {
-                        println!("client {} - I received a fragment for req_id \"{}\" that it's unknown to me, dropping", self.id, PacketId::from_u64(packet.session_id).get_request_id());
-                    }
-                }
+                self.handle_fragment(packet, fragment);
             }
         }
     }
@@ -666,7 +768,10 @@ impl WebBrowser {
     }
 
     fn complete_request(&mut self, mut req: Request) {
-        println!("Client {}, completing req (from: {:?}, {:?}, to: {:?})", self.id, req.request_id, req.request_type, req.server_id);
+        println!(
+            "Client {}, completing req (from: {:?}, {:?}, to: {:?})",
+            self.id, req.request_id, req.request_type, req.server_id
+        );
         req.incoming_messages
             .sort_by(|f1, f2| f1.fragment_index.cmp(&f2.fragment_index));
         let content =
@@ -755,16 +860,6 @@ impl WebBrowser {
         }
     }
 
-    fn send_packet(&self, packet: Packet, channel: &Sender<Packet>) {
-        let _ = self
-            .controller_send
-            .send(ClientEvent::PacketSent(packet.clone()));
-        match channel.send(packet.clone()) {
-            Ok(()) => println!("client {} - sent {:?}", self.id, packet.clone()),
-            Err(e) => println!("client {} - {e}", self.id),
-        }
-    }
-
     fn handle_command(&mut self, command: ClientCommand) {
         println!("Handing command {:?}", command);
         match command {
@@ -824,12 +919,6 @@ impl WebBrowser {
         self.sequential_flood_id += 1;
     }
 
-    fn source_routing_header_from_graph_search(&self, dest: NodeId) -> Option<SourceRoutingHeader> {
-        // TODO change edge cost when present in the graph
-        astar(&self.topology_graph, self.id, |n| n == dest, |_| 1, |_| 0)
-            .map(|(_, path)| wg_2024::network::SourceRoutingHeader::with_first_hop(path))
-    }
-
     fn add_request(
         &mut self,
         server_id: NodeId,
@@ -838,7 +927,6 @@ impl WebBrowser {
         request_type: RequestType,
     ) {
         println!("Adding request");
-        let opt = self.source_routing_header_from_graph_search(server_id);
 
         let mut new_request = Request::new(
             self.packet_id_counter.get_request_id(),
@@ -849,33 +937,24 @@ impl WebBrowser {
         );
 
         for f in frags {
-            let mut p = wg_2024::packet::Packet::new_fragment(
+            let p = wg_2024::packet::Packet::new_fragment(
                 SourceRoutingHeader::empty_route(),
                 self.packet_id_counter.get_session_id(),
                 f.clone(),
             );
-            new_request.waiting_for_ack.insert(self.packet_id_counter.clone(), f.clone());
+            new_request
+                .waiting_for_ack
+                .insert(self.packet_id_counter.clone(), f.clone());
 
-            if let Some(routing_header) = &opt {
-                let next_hop_id = routing_header
-                    .current_hop()
-                    .expect("Header created from a valid path is invalid. BUG");
-
-                let channel = self
-                    .packet_send
-                    .get(&next_hop_id)
-                    .expect("Found inconsistency between graph and list of neighbours, BUG");
-
-                p.routing_header = routing_header.clone();
-                self.send_packet(p, channel);
-            }
-            else {
-                self.waiting_for_flood.push_back((self.packet_id_counter.clone(), f));
+            if let (packet, Some(channel)) = self.prepare_packet_routing(p, server_id) {
+                self.send_packet(packet, channel);
+            } else {
+                self.waiting_for_flood
+                    .push_back((self.packet_id_counter.clone(), f));
                 self.start_flooding();
             }
 
             self.packet_id_counter.increment_packet_id();
-
         }
 
         self.pending_requests.push(new_request);
@@ -883,18 +962,11 @@ impl WebBrowser {
         self.packet_id_counter.increment_request_id();
     }
 
-    fn is_correct_server_type(&self, server_id: NodeId, requested_type: GraphNodeType) -> bool {
-        self.nodes_type
-            .get(&server_id)
-            .is_some_and(|t| *t == requested_type)
-    }
-
     fn create_request(&mut self, request_type: RequestType) {
         let compression: Compression = Compression::None; // TODO has to be chosen by scl or randomically
 
         match &request_type {
             RequestType::ListOfFile(server_id) => {
-
                 let frags =
                     web_messages::RequestMessage::new_text_list_request(self.id, compression.clone())
                         .fragment()
@@ -955,4 +1027,3 @@ impl WebBrowser {
         }
     }
 }
-
