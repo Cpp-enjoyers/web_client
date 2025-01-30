@@ -10,6 +10,7 @@ crossbeam-channel = "0.5"
 compression = {git = "https://github.com/Cpp-enjoyers/compression_lib.git"}
 bincode = {version = "2.0.0-rc", features = ["serde"]}
 petgraph = "0.7"
+itertools = "0.14.0"
 
 ap2024_unitn_cppenjoyers_drone = { git = "https://github.com/Cpp-enjoyers/drone.git" }
 

@@ -1,15 +1,44 @@
 #[cfg(test)]
 mod web_client_tests {
-    use std::{thread, time::Duration, vec};
+    use itertools::Itertools;
+    use std::{hash::BuildHasher, thread, time::Duration, vec};
 
     use ap2024_unitn_cppenjoyers_drone::CppEnjoyersDrone;
     use common::Client;
     use crossbeam_channel::unbounded;
+    use petgraph::prelude::GraphMap;
     use wg_2024::{controller::DroneCommand, drone::Drone};
 
     use crate::*;
 
     const MS500: Duration = Duration::from_millis(500);
+
+    /// compares two graphmaps
+    fn graphmap_eq<N, E, Ty, Ix>(a: &GraphMap<N, E, Ty, Ix>, b: &GraphMap<N, E, Ty, Ix>) -> bool
+    where
+        N: PartialEq + PartialOrd + std::hash::Hash + Ord + Copy,
+        E: PartialEq + Copy + PartialOrd,
+        Ty: petgraph::EdgeType,
+        Ix: BuildHasher,
+    {
+        // let a_ns = a.nodes();
+        // let b_ns = b.nodes();
+        let a_es = a.all_edges().map(|e| (e.0, e.1, *e.2));
+        let b_es = b.all_edges().map(|e| ((e.0, e.1, *e.2)));
+        a_es.sorted_by(|a, b| a.partial_cmp(b).unwrap())
+            .eq(b_es.sorted_by(|a, b| a.partial_cmp(b).unwrap()))
+        /*
+        for (a, b, c) in a_es.sorted_by(|a, b| a.partial_cmp(b).unwrap()) {
+            print!("{a}, {b}, {c} - ");
+        }
+        println!("\n---");
+        for (a, b, c) in b_es.sorted_by(|a, b| a.partial_cmp(b).unwrap()) {
+            print!("{a}, {b}, {c} - ");
+        }
+        println!("\n-----");
+        true
+         */
+    }
 
     #[test]
     pub fn my_flood_request_simple_top() {
@@ -273,91 +302,30 @@ mod web_client_tests {
         let (c_send, c_recv) = unbounded();
         // Drone 11
         let (d_send, d_recv) = unbounded();
-        // Drone 12
-        let (d12_send, d12_recv) = unbounded();
-        // Drone 13
-        let (d13_send, d13_recv) = unbounded();
-        // SC - needed to not make the drone crash
-        let (_d_command_send, d_command_recv) = unbounded();
-        let (_d12_command_send, d12_command_recv) = unbounded();
+
         let (c_event_send, _) = unbounded();
         let (c_command_send, c_command_recv) = unbounded();
 
-        // Drone 11
-        let neighbours11 = HashMap::from([(1, c_send.clone())]);
-        let mut drone = CppEnjoyersDrone::new(
-            11,
-            unbounded().0,
-            d_command_recv.clone(),
-            d_recv.clone(),
-            neighbours11,
-            0.0,
-        );
-        // Drone 12
-        let neighbours12 = HashMap::from([(13, d13_send.clone())]);
-        let mut drone2 = CppEnjoyersDrone::new(
-            12,
-            unbounded().0,
-            d12_command_recv.clone(),
-            d12_recv.clone(),
-            neighbours12,
-            0.0,
-        );
-        // Drone 13
-        let neighbours13 = HashMap::from([(12, d12_send.clone())]);
-        let mut drone3 = CppEnjoyersDrone::new(
-            13,
-            unbounded().0,
-            d_command_recv.clone(),
-            d13_recv.clone(),
-            neighbours13,
-            0.0,
-        );
-
-        // client 1
-        let neighbours1 = HashMap::from([(11, d_send.clone())]);
-        let mut client1 = WebBrowser::new(
+        let mut client = WebBrowser::new(
             1,
             c_event_send.clone(),
-            c_command_recv,
-            c_recv.clone(),
-            neighbours1,
+            c_command_recv.clone(),
+            c_recv,
+            HashMap::new(),
         );
 
-        // Spawn the drone's run method in a separate thread
-        thread::spawn(move || {
-            drone.run();
-        });
-
-        thread::spawn(move || {
-            drone2.run();
-        });
-
-        thread::spawn(move || {
-            drone3.run();
-        });
-
-        sleep(MS500);
-        thread::spawn(move || {
-            client1.run();
-        });
-
-        _d12_command_send.send(DroneCommand::AddSender(1, c_send.clone()));
-
         sleep(MS500);
 
-        c_command_send.send(ClientCommand::AddSender(12, d12_send.clone()));
+        client.handle_command(ClientCommand::AddSender(11, d_send.clone()));
 
-        sleep(MS500);
-        /*
-        graph:
-            1: [(11, Outgoing), (11, Incoming), (12, Outgoing), (12, Incoming)],
-            11: [(1, Incoming), (1, Outgoing)],
-            12: [(1, Incoming), (1, Outgoing), (13, Outgoing), (13, Incoming)],
-            13: [(12, Incoming), (12, Outgoing)]
-        }
-        nodes type: {12: Drone, 1: Client, 11: Drone, 13: Drone}
-        */
+        assert_eq!(
+            d_recv.recv().unwrap(),
+            Packet::new_flood_request(
+                SourceRoutingHeader::empty_route(),
+                0,
+                FloodRequest::initialize(0, 1, NodeType::Client)
+            )
+        );
     }
 
     #[test]

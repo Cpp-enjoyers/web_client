@@ -40,7 +40,7 @@ impl Into<GraphNodeType> for ServerType {
     }
 }
 
-impl GraphNodeType{
+impl GraphNodeType {
     fn from_node_type(n: NodeType) -> Self {
         match n {
             NodeType::Client => Self::Client,
@@ -831,7 +831,6 @@ impl WebBrowser {
                             .controller_send
                             .send(ClientEvent::ListOfFiles(vec, req.server_id));
                         println!("sent message to scl {{{:?}}}", a);
-
                     }
                     TextResponse::Text(file) => {
                         if file.contains("<img>") {
