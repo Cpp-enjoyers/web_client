@@ -1123,7 +1123,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn server_type_request_nack_error_in_routing(){
+    pub fn server_type_request_nack_error_in_routing() {
         // client 1 <--> 11 <--> 21 server
 
         // Client 1 channels
@@ -1189,19 +1189,24 @@ mod web_client_tests {
         );
         let _ = d_send.send(flood_response);
 
-
         sleep(MS500);
 
         let _ = c_command_send.send(ClientCommand::AskServersTypes);
 
         // send fake nack with problematic node id = 11
         let req_to_ignore = s_recv.recv().unwrap();
-        let nack = Packet::new_nack(SourceRoutingHeader{
-            hop_index: 1,
-            hops: vec![21, 11, 1]
-        }, req_to_ignore.session_id, Nack{fragment_index: 0, nack_type: NackType::ErrorInRouting(11)});
+        let nack = Packet::new_nack(
+            SourceRoutingHeader {
+                hop_index: 1,
+                hops: vec![21, 11, 1],
+            },
+            req_to_ignore.session_id,
+            Nack {
+                fragment_index: 0,
+                nack_type: NackType::ErrorInRouting(11),
+            },
+        );
         d_send.send(nack).unwrap();
-
 
         // floodrequest since now the client has no path to 21
         let _flood_request = s_recv.recv().unwrap();
@@ -1674,8 +1679,13 @@ Pellentesque eget elit vulputate, eleifend arcu eu, maximus risus. Donec vitae s
 
     #[test]
     fn text_response_compressed() {
-        let before = ResponseMessage::new_text_response(21, Compression::LZW, "abcdefgh.".to_string());
-        let bytes = LZWCompressor::new().compress(before.serialize().unwrap()).unwrap().serialize().unwrap();
+        let before =
+            ResponseMessage::new_text_response(21, Compression::LZW, "abcdefgh.".to_string());
+        let bytes = LZWCompressor::new()
+            .compress(before.serialize().unwrap())
+            .unwrap()
+            .serialize()
+            .unwrap();
 
         let chunks: std::slice::Chunks<'_, u8> = bytes.chunks(FRAGMENT_DSIZE);
         let n_frag = chunks.len();

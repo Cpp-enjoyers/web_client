@@ -1,6 +1,6 @@
 use common::slc_commands::{ClientCommand, ClientEvent, ServerType};
 use core::time;
-use crossbeam_channel::{select, Receiver, Sender};
+use crossbeam_channel::{select, select_biased, Receiver, Sender};
 use petgraph::algo::astar;
 use petgraph::prelude::DiGraphMap;
 use std::collections::{HashMap, VecDeque};
@@ -30,15 +30,17 @@ enum GraphNodeType {
     Client,
     Drone,
 }
-impl GraphNodeType {
-    fn from_server_type(n: ServerType) -> Self {
-        match n {
-            ServerType::ChatServer => Self::Chat,
-            ServerType::FileServer => Self::Text,
-            ServerType::MediaServer => Self::Media,
+impl Into<GraphNodeType> for ServerType {
+    fn into(self) -> GraphNodeType {
+        match self {
+            ServerType::ChatServer => GraphNodeType::Chat,
+            ServerType::FileServer => GraphNodeType::Text,
+            ServerType::MediaServer => GraphNodeType::Media,
         }
     }
+}
 
+impl GraphNodeType{
     fn from_node_type(n: NodeType) -> Self {
         match n {
             NodeType::Client => Self::Client,
@@ -47,7 +49,6 @@ impl GraphNodeType {
         }
     }
 }
-
 trait Fragmentable: Serializable {
     fn fragment(&self) -> Result<Vec<Fragment>, SerializationError>;
 
@@ -100,10 +101,10 @@ impl Fragmentable for RequestMessage {
             Compression::LZW => {
                 let compressed = <Vec<u16>>::deserialize(msg)?;
 
-                LZWCompressor::new()
-                    .decompress(compressed)
-                    .map_err(|e| {println!("{e}");SerializationError})?
-
+                LZWCompressor::new().decompress(compressed).map_err(|e| {
+                    println!("{e}");
+                    SerializationError
+                })?
             }
 
             Compression::None => msg,
@@ -296,7 +297,6 @@ impl Client for WebBrowser {
         self.start_flooding();
 
         loop {
-
             if let Some(i) = self
                 .pending_requests
                 .iter()
@@ -337,9 +337,7 @@ impl Client for WebBrowser {
                 }
             }
 
-
-
-            select! {
+            select_biased! {
                 recv(self.controller_recv) -> command => {
                     if let Ok(command) = command {
                         self.handle_command(command);
@@ -351,8 +349,6 @@ impl Client for WebBrowser {
                     }
                 },
             }
-
-
         }
     }
 }
@@ -539,13 +535,14 @@ impl WebBrowser {
             let mut prev: Option<(NodeId, NodeType)> = None;
             for (id, node_type) in &resp.path_trace {
                 if let Some((from_id, from_type)) = prev {
-                    if *id == self.id || from_id == self.id{
+                    if *id == self.id || from_id == self.id {
                         self.topology_graph.add_edge(from_id, *id, 1);
                         self.topology_graph.add_edge(*id, from_id, 1);
-                    }
-                    else{
+                    } else {
                         // this prevents A* to find path with client/server in the middle
-                        if matches!(from_type, NodeType::Client) | matches!(from_type, NodeType::Server) {
+                        if matches!(from_type, NodeType::Client)
+                            | matches!(from_type, NodeType::Server)
+                        {
                             self.topology_graph.add_edge(*id, from_id, 1);
                         } else if matches!(node_type, NodeType::Client)
                             | matches!(node_type, NodeType::Server)
@@ -690,7 +687,7 @@ impl WebBrowser {
                         };
 
                         match nack.nack_type {
-                            NackType::Dropped | NackType::DestinationIsDrone=> {
+                            NackType::Dropped | NackType::DestinationIsDrone => {
                                 // TODO update graph with some metric
                                 let dest = req.server_id;
                                 let p = Packet::new_fragment(
@@ -699,7 +696,9 @@ impl WebBrowser {
                                     fragment.clone(),
                                 );
 
-                                if let (packet, Some(channel)) = self.prepare_packet_routing(p, dest) {
+                                if let (packet, Some(channel)) =
+                                    self.prepare_packet_routing(p, dest)
+                                {
                                     self.send_packet(packet, channel);
                                 } else {
                                     self.waiting_for_flood.push_back((
@@ -722,7 +721,9 @@ impl WebBrowser {
                                     packet.session_id,
                                     fragment.clone(),
                                 );
-                                if let (packet, Some(channel)) = self.prepare_packet_routing(p, dest){
+                                if let (packet, Some(channel)) =
+                                    self.prepare_packet_routing(p, dest)
+                                {
                                     self.send_packet(packet, channel);
                                 } else {
                                     self.waiting_for_flood.push_back((
@@ -788,7 +789,7 @@ impl WebBrowser {
                     GenericResponse::Type(server_type) => {
                         self.nodes_type
                             .entry(req.server_id)
-                            .and_modify(|t| *t = GraphNodeType::from_server_type(server_type));
+                            .and_modify(|t| *t = server_type.into());
 
                         // I discovered all the server type
                         if !self
@@ -826,9 +827,11 @@ impl WebBrowser {
                 match resp {
                     TextResponse::TextList(vec) => {
                         println!("sending message to scl {{{:?}}}", vec);
-                        let _ = self
+                        let a = self
                             .controller_send
                             .send(ClientEvent::ListOfFiles(vec, req.server_id));
+                        println!("sent message to scl {{{:?}}}", a);
+
                     }
                     TextResponse::Text(file) => {
                         if file.contains("<img>") {
@@ -897,15 +900,12 @@ impl WebBrowser {
     }
 
     fn start_flooding(&mut self) {
-        println!("client {} - starting flooding", self.id);
+        println!("client {} - starting flood", self.id);
 
-        let (p, _) = self.prepare_packet_routing(
-            Packet::new_flood_request(
-                SourceRoutingHeader::empty_route(),
-                0, // sessionId is useless in flood requests and responses
-                FloodRequest::initialize(self.sequential_flood_id, self.id, NodeType::Client),
-            ),
-            0, // useless for flood
+        let p = Packet::new_flood_request(
+            SourceRoutingHeader::empty_route(),
+            0, // sessionId is useless in flood requests and responses
+            FloodRequest::initialize(self.sequential_flood_id, self.id, NodeType::Client),
         );
 
         self.flood_history.entry(self.id).and_modify(|ring| {
