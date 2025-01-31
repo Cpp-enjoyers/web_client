@@ -1454,7 +1454,7 @@ mod web_client_tests {
 
         // send my file
         let data =
-            web_messages::ResponseMessage::new_text_response(21, Compression::None, file.clone())
+            web_messages::ResponseMessage::new_text_response(21, Compression::None, file.as_bytes().to_vec())
                 .fragment()
                 .unwrap();
         let n_frags = data.len();
@@ -1500,15 +1500,242 @@ mod web_client_tests {
         let a = c_event_recv.recv().unwrap();
         //println!("-----{:?}", a);
         if let ClientEvent::FileFromClient(content, id) = a {
-            assert_eq!(content, file);
+            assert_eq!(content.get(0).unwrap().to_owned(), file.as_bytes().to_vec());
             assert_eq!(id, 21);
         } else {
             assert!(false)
         }
     }
 
-}
+    /*
+    #[test]
+    pub fn file_request_with_one_media() {
 
+        let file = "ciao <img>";
+
+        // Client 1 channels
+        let (c_send, c_recv) = unbounded();
+        // Drone 11
+        let (d_send, d_recv) = unbounded();
+        // SC - needed to not make the drone crash
+        let (_d_command_send, d_command_recv) = unbounded();
+        let (c_event_send, c_event_recv) = unbounded();
+        let (c_command_send, c_command_recv) = unbounded();
+        // Server
+        let (s_send, s_recv) = unbounded();
+
+        let mut client = WebBrowser::new(1, c_event_send.clone(), c_command_recv.clone(),
+         c_recv.clone(), HashMap::from([(21, d_send.clone()), (22, d_send.clone())]));
+
+        client.nodes_type = HashMap::from([(21, GraphNodeType::Text), (22, GraphNodeType::Media)]);
+
+        client.handle_command(ClientCommand::RequestFile("filename.html".to_string(), 21));
+
+        d_recv.recv().unwrap();
+
+        // ACK has been received
+        client.pending_requests.get_mut(0).unwrap().waiting_for_ack = HashMap::new();
+        // fragment has been received
+        client.pending_requests.get_mut(0).unwrap().incoming_messages = vec![Fragment::new(0, 1, data)];
+
+        client.handle_packet(Packet::n);
+
+
+        sleep(MS500);
+        c_event_recv.recv().unwrap();
+
+        // receive flood request and send response
+        let _flood_request = s_recv.recv().unwrap();
+        let flood_response = Packet::new_flood_response(
+            SourceRoutingHeader {
+                hop_index: 1,
+                hops: vec![21, 11, 1],
+            },
+            0,
+            FloodResponse {
+                flood_id: 0,
+                path_trace: vec![
+                    (1, NodeType::Client),
+                    (11, NodeType::Drone),
+                    (21, NodeType::Server),
+                ],
+            },
+        );
+        let _ = d_send.send(flood_response);
+        sleep(MS500);
+
+        // send ServerType command to drone
+        let _ = c_command_send.send(ClientCommand::AskServersTypes);
+
+        // receive type request from client
+        //println!("{:?}", req);
+        let req = s_recv.recv().unwrap();
+        assert_eq!(req.session_id, 0);
+        let mut data = Vec::new();
+        match req.pack_type {
+            PacketType::MsgFragment(f) => data.push(f),
+            _ => {}
+        };
+        let resp = RequestMessage::defragment(&data, Compression::None).unwrap();
+        c_event_recv.recv().unwrap();
+
+        assert_eq!(
+            resp,
+            RequestMessage {
+                compression_type: Compression::None,
+                source_id: 1,
+                content: web_messages::Request::Type
+            }
+        );
+        // send ACK
+        let _ = d_send.send(Packet::new_ack(
+            SourceRoutingHeader {
+                hop_index: 1,
+                hops: vec![21, 11, 1],
+            },
+            0,
+            0,
+        ));
+
+        // send my type
+        let data = web_messages::ResponseMessage::new_type_response(
+            21,
+            Compression::None,
+            ServerType::FileServer,
+        )
+        .fragment()
+        .unwrap();
+        assert_eq!(data.len(), 1);
+
+        let _ = d_send.send(Packet::new_fragment(
+            SourceRoutingHeader {
+                hop_index: 1,
+                hops: vec![21, 11, 1],
+            },
+            0,
+            data[0].clone(),
+        ));
+
+        sleep(MS500);
+
+        // client response to scl
+        c_event_recv.recv().unwrap();
+        assert_eq!(
+            s_recv.recv().unwrap(),
+            Packet {
+                session_id: 0,
+                routing_header: SourceRoutingHeader {
+                    hop_index: 2,
+                    hops: vec![1, 11, 21]
+                },
+                pack_type: PacketType::Ack(Ack { fragment_index: 0 })
+            }
+        );
+        let resp = c_event_recv.recv().unwrap();
+        //println!("--{:?}", resp);
+        if let ClientEvent::ServersTypes(map) = resp {
+            assert_eq!(map, HashMap::from([(21, ServerType::FileServer)]));
+        } else {
+            assert!(false)
+        }
+
+        let file = r#"Dolor molestiae debitis asperiores provident aut odit ratione. Sit totam officia dolores eos cumque blanditiis amet. Nesciunt voluptas voluptatem quas amet illum ipsam corrupti voluptate. Perspiciatis necessitatibus occaecati aliquid. Tempore id voluptas perferendis. Quis molestias enim veniam.
+        Architecto enim sequi et sunt ut iusto repellendus. Voluptatem placeat iure veniam recusandae sit velit. Autem sed vel error et eaque aperiam deserunt. Vero iste quibusdam qui alias ullam qui et quo.
+        Et eligendi voluptas ut nobis iste culpa est aliquam. Saepe quos commodi assumenda beatae voluptatem. Aliquam occaecati quia ut. Possimus aut officiis deleniti non. Qui voluptas enim nemo et.
+        Ut expedita aut cum minima quo nostrum. Nemo distinctio non rem voluptatem reiciendis incidunt vel soluta. Voluptatem autem aut et alias sunt. Et et quo mollitia necessitatibus earum.
+        Nihil qui odit cum temporibus. Alias sit quos est placeat. Non iste placeat voluptatem est ipsum aperiam recusandae nulla. Praesentium vel quis doloremque nemo quae. Et tempora beatae sunt corporis asperiores nesciunt."#.to_string();
+
+        // send file command to client
+        let _ = c_command_send.send(ClientCommand::RequestFile("file1".to_string(), 21));
+
+        // receive file request from client
+        let req = s_recv.recv().unwrap();
+        assert_eq!(req.session_id, 1);
+        //println!("****{:?}", req);
+        let mut data = Vec::new();
+        match req.pack_type {
+            PacketType::MsgFragment(f) => data.push(f),
+            _ => {}
+        };
+        let resp = RequestMessage::defragment(&data, Compression::None).unwrap();
+        c_event_recv.recv().unwrap();
+
+        assert_eq!(
+            resp,
+            RequestMessage {
+                compression_type: Compression::None,
+                source_id: 1,
+                content: web_messages::Request::Text(TextRequest::Text("file1".to_string()))
+            }
+        );
+        // send ACK
+        let _ = d_send.send(Packet::new_ack(
+            SourceRoutingHeader {
+                hop_index: 1,
+                hops: vec![21, 11, 1],
+            },
+            1,
+            0,
+        ));
+
+        // send my file
+        let data =
+            web_messages::ResponseMessage::new_text_response(21, Compression::None, file.as_bytes().to_vec())
+                .fragment()
+                .unwrap();
+        let n_frags = data.len();
+        let mut packet_id = PacketId::from_u64(1);
+
+        for f in data {
+            let _ = d_send.send(Packet::new_fragment(
+                SourceRoutingHeader {
+                    hop_index: 1,
+                    hops: vec![21, 11, 1],
+                },
+                packet_id.get_session_id(),
+                f,
+            ));
+
+            packet_id.increment_packet_id();
+        }
+
+        sleep(MS500);
+        let mut packet_id = PacketId::from_u64(1);
+
+        // ACKs to server
+        for i in 0..n_frags {
+            let _ = c_event_recv.recv().unwrap();
+            //println!("{i}");
+            assert_eq!(
+                s_recv.recv().unwrap(),
+                Packet {
+                    session_id: packet_id.get_session_id(),
+                    routing_header: SourceRoutingHeader {
+                        hop_index: 2,
+                        hops: vec![1, 11, 21]
+                    },
+                    pack_type: PacketType::Ack(Ack {
+                        fragment_index: i as u64
+                    })
+                }
+            );
+            packet_id.increment_packet_id();
+        }
+
+        // client response
+        let a = c_event_recv.recv().unwrap();
+        //println!("-----{:?}", a);
+        if let ClientEvent::FileFromClient(content, id) = a {
+            assert_eq!(content.get(0).unwrap().to_owned(), file.as_bytes().to_vec());
+            assert_eq!(id, 21);
+        } else {
+            assert!(false)
+        }
+    }
+
+
+    */
+}
 #[cfg(test)]
 mod fragmentation_tests {
     use common::web_messages::{Compression, RequestMessage, ResponseMessage, Serializable};
@@ -1574,7 +1801,7 @@ Etiam eget sollicitudin massa. Nam et sem sit amet sem facilisis vulputate quis 
     #[test]
     fn text_response() {
         let before = ResponseMessage::new_text_response(21, Compression::None, r#"Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed in lobortis ex. Fusce gravida pharetra lacus, sed ornare quam aliquam sit amet. In hac habitasse platea dictumst. Vestibulum tristique est et varius cursus. Donec tincidunt suscipit augue, eget porta enim porta at. Integer rutrum viverra dictum. Donec neque justo, euismod nec sem vel, porttitor lacinia nunc. Vestibulum sagittis, metus sed tempus tempus, lorem metus placerat velit, sit amet blandit arcu quam imperdiet est. Sed pulvinar erat ut diam bibendum euismod. Proin fermentum nec velit eget fermentum. Phasellus non dapibus urna, eget tempus neque. Aliquam id nibh sed nunc condimentum tempus ac et dui.
-Etiam eget sollicitudin massa. Nam et sem sit amet sem facilisis vulputate quis sed ante. In vel mi ut nulla commodo facilisis ac eu orci. Suspendisse potenti. Cras sollicitudin volutpat diam ut porttitor. Nam non tellus eros. Mauris eu interdum augue, quis tincidunt odio."#.to_string());
+Etiam eget sollicitudin massa. Nam et sem sit amet sem facilisis vulputate quis sed ante. In vel mi ut nulla commodo facilisis ac eu orci. Suspendisse potenti. Cras sollicitudin volutpat diam ut porttitor. Nam non tellus eros. Mauris eu interdum augue, quis tincidunt odio."#.as_bytes().to_vec());
         let data = before.fragment().unwrap();
         let after = ResponseMessage::defragment(&data, Compression::None).unwrap();
 
@@ -1648,7 +1875,7 @@ Pellentesque eget elit vulputate, eleifend arcu eu, maximus risus. Donec vitae s
     #[test]
     fn text_response_compressed() {
         let before =
-            ResponseMessage::new_text_response(21, Compression::LZW, "abcdefgh.".to_string());
+            ResponseMessage::new_text_response(21, Compression::LZW, "abcdefgh.".as_bytes().to_vec());
         let bytes = LZWCompressor::new()
             .compress(before.serialize().unwrap())
             .unwrap()

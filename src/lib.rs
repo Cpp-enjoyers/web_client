@@ -224,8 +224,8 @@ pub struct WebBrowser {
     topology_graph: DiGraphMap<NodeId, u64>,
     nodes_type: HashMap<NodeId, GraphNodeType>,
     waiting_for_flood: VecDeque<(PacketId, Fragment)>, // stores the outgoing fragment for which I couldn't find a path or I received a NACK back instead of ACK
-    text_media_map: HashMap<String, Vec<String>>, // links a text files to the media files that it requires
-    stored_files: HashMap<String, Option<String>>, // filename -> file
+    text_media_map: HashMap<String, Vec<String>>, // links a text filename to the media filenames that it requires
+    stored_files: HashMap<String, Vec<u8>>, // filename -> file
 }
 
 impl Flooder for WebBrowser {
@@ -303,6 +303,7 @@ impl Client for WebBrowser {
         self.start_flooding();
 
         loop {
+            // complete request
             if let Some(i) = self
                 .pending_requests
                 .iter()
@@ -312,6 +313,7 @@ impl Client for WebBrowser {
                 self.complete_request(req);
             }
 
+            // try sending a packet that received a NACK
             if let Some((id, frag)) = self.waiting_for_flood.pop_front() {
                 match self
                     .pending_requests
@@ -343,7 +345,28 @@ impl Client for WebBrowser {
                 }
             }
 
-            // check if there exist a text file that has all the media files available
+            // check if there exist a text file that has all the media files available,
+            // send response and clear the relative entries
+            if let Some(key) = self.text_media_map.iter().find(|(_, list)| {
+                for f in *list{
+                    if self.stored_files.get(f).is_none(){
+                        return false;
+                    }
+                }
+                true
+            }).and_then(|(key, _)| Some(key.clone()) )
+            {
+                if let Some(media_list) = self.text_media_map.remove(&key){
+                    let mut file_list: Vec<Vec<u8>> = vec![];
+                    // ! unwrap should be safe at this point
+                    file_list.push(self.stored_files.remove(&key).unwrap());
+                    for media in media_list{
+                        file_list.push(self.stored_files.remove(&media).unwrap());
+                    }
+                    self.controller_send.send(ClientEvent::FileFromClient(file_list, 0));
+                }
+
+            }
 
 
             select_biased! {
@@ -828,6 +851,7 @@ impl WebBrowser {
                         let _ = self.controller_send.send(ClientEvent::UnsupportedRequest);
                     }
                     GenericResponse::NotFound => {
+                        // ! add apposite clientevent
                         let _ = self.controller_send.send(ClientEvent::UnsupportedRequest);
                     }
                 }
@@ -841,7 +865,9 @@ impl WebBrowser {
                             .send(ClientEvent::ListOfFiles(vec, req.server_id));
                     }
                     TextResponse::Text(file) => {
-                        if file.contains("<img>") {
+                        let file_str = String::from_utf8(file.clone()).unwrap();
+
+                        if file_str.contains("<img>") {
                             let needed_media = Vec::<String>::new(); // ! change with parsing output
                             let text_filename = match req.request_type {
                                 RequestType::TextRequest(filename, _) => filename,
@@ -854,11 +880,11 @@ impl WebBrowser {
                             };
                             // store the file while waiting for media
                             self.stored_files
-                            .insert(text_filename.clone(), Some(file));
+                            .insert(text_filename.clone(), file);
 
                             needed_media.iter().for_each(|media_filename| {
                                 // store every media in stored_files as (filename, None)
-                                self.stored_files.insert(media_filename.clone(), None);
+                                self.stored_files.insert(media_filename.clone(), Vec::new());
                             });
                             // store media and text files links
                             self.text_media_map.insert(text_filename.clone(), needed_media);
@@ -877,7 +903,7 @@ impl WebBrowser {
                             // TODO maybe send to scl a vec<string> if media are not embedded
                             let _ = self
                                 .controller_send
-                                .send(ClientEvent::FileFromClient(file, req.server_id));
+                                .send(ClientEvent::FileFromClient(vec![file], req.server_id));
                         }
                     }
                 }
@@ -903,10 +929,8 @@ impl WebBrowser {
                                 return;
                             }
                         };
-                        // ! change conversion whne type of file is fixed
-                        let file = String::from_utf8(file).unwrap();
 
-                        self.stored_files.entry(media_filename.clone()).and_modify(|opt_file| *opt_file = Some(file));
+                        self.stored_files.entry(media_filename.clone()).and_modify(|content| *content = file);
                     }
                 }
             }
