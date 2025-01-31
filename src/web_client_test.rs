@@ -329,7 +329,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn file_list_request() {
+    pub fn file_list_scl_command() {
         // client 1 <--> 11 <--> 21 server
 
         // Client 1 channels
@@ -476,7 +476,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn file_list_request_with_nack_dropped() {
+    pub fn file_list_scl_command_with_nack_dropped() {
         // client 1 <--> 11 <--> 21 server
 
         // Client 1 channels
@@ -657,7 +657,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn file_request_with_4_nack_dropped() {
+    pub fn file_list_scl_command_with_4_nack_dropped() {
         // client 1 <--> 11 <--> 21 server
 
         // Client 1 channels
@@ -1197,7 +1197,6 @@ mod web_client_tests {
 
         // receive request
         let req = s_recv.recv().unwrap();
-        println!("-------------");
 
         let mut data = Vec::new();
         match req.pack_type {
@@ -1507,6 +1506,7 @@ mod web_client_tests {
             assert!(false)
         }
     }
+
 }
 
 #[cfg(test)]

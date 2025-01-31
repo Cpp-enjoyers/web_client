@@ -4,13 +4,14 @@ use crossbeam_channel::{select, select_biased, Receiver, Sender};
 use petgraph::algo::astar;
 use petgraph::prelude::DiGraphMap;
 use std::collections::{HashMap, VecDeque};
+use std::hash::Hash;
 use std::thread::sleep;
 use wg_2024::network::{NodeId, SourceRoutingHeader};
 use wg_2024::packet::*;
 
 use common::networking::flooder::Flooder;
 use common::ring_buffer::RingBuffer;
-use common::web_messages::*;
+use common::web_messages::{Request, *};
 use common::Client;
 use common::{slc_commands, web_messages};
 use compression::lzw::LZWCompressor;
@@ -172,14 +173,15 @@ const RING_BUFF_SZ: usize = 64;
 
 #[derive(Debug, Clone)]
 enum RequestType {
-    ListOfFile(NodeId),
-    ServersType,
+    TextListRequest(NodeId),
+    MediaListRequest(NodeId),
+    ServersTypeRequest,
     TextRequest(String, NodeId),
     MediaRequest(String, NodeId),
 }
 
 #[derive(Debug, Clone)]
-struct Request {
+struct WebBrowserRequest {
     request_id: RequestId,
     server_id: NodeId,
     waiting_for_ack: HashMap<PacketId, Fragment>, // stores the outgoing fragments that are still waiting for ACK
@@ -188,7 +190,7 @@ struct Request {
     request_type: RequestType,
     response_is_complete: bool,
 }
-impl Request {
+impl WebBrowserRequest {
     fn new(
         request_id: RequestId,
         server_id: NodeId,
@@ -217,11 +219,13 @@ pub struct WebBrowser {
     packet_send: HashMap<NodeId, Sender<Packet>>,
     flood_history: HashMap<NodeId, RingBuffer<u64>>,
     sequential_flood_id: u64,
-    pending_requests: Vec<Request>,
+    pending_requests: Vec<WebBrowserRequest>,
     packet_id_counter: PacketId,
     topology_graph: DiGraphMap<NodeId, u64>,
     nodes_type: HashMap<NodeId, GraphNodeType>,
     waiting_for_flood: VecDeque<(PacketId, Fragment)>, // stores the outgoing fragment for which I couldn't find a path or I received a NACK back instead of ACK
+    text_media_map: HashMap<String, Vec<String>>, // links a text files to the media files that it requires
+    stored_files: HashMap<String, Option<String>>, // filename -> file
 }
 
 impl Flooder for WebBrowser {
@@ -289,6 +293,8 @@ impl Client for WebBrowser {
             topology_graph: DiGraphMap::from_edges(initial_edges),
             nodes_type: HashMap::from([(id, GraphNodeType::Client)]),
             waiting_for_flood: VecDeque::new(),
+            text_media_map: HashMap::new(),
+            stored_files: HashMap::new(),
         }
     }
 
@@ -336,6 +342,9 @@ impl Client for WebBrowser {
                     }
                 }
             }
+
+            // check if there exist a text file that has all the media files available
+            
 
             select_biased! {
                 recv(self.controller_recv) -> command => {
@@ -768,7 +777,7 @@ impl WebBrowser {
         }
     }
 
-    fn complete_request(&mut self, mut req: Request) {
+    fn complete_request(&mut self, mut req: WebBrowserRequest) {
         println!(
             "Client {}, completing req (from: {:?}, {:?}, to: {:?})",
             self.id, req.request_id, req.request_type, req.server_id
@@ -791,7 +800,7 @@ impl WebBrowser {
                             .entry(req.server_id)
                             .and_modify(|t| *t = server_type.into());
 
-                        // I discovered all the server type
+                        // if I discovered all the server type
                         if !self
                             .nodes_type
                             .iter()
@@ -827,17 +836,43 @@ impl WebBrowser {
                 match resp {
                     TextResponse::TextList(vec) => {
                         println!("sending message to scl {{{:?}}}", vec);
-                        let a = self
+                        let _ = self
                             .controller_send
                             .send(ClientEvent::ListOfFiles(vec, req.server_id));
-                        println!("sent message to scl {{{:?}}}", a);
                     }
                     TextResponse::Text(file) => {
                         if file.contains("<img>") {
-                            todo!()
-                            //parsing ...
-                            // create media request
-                            // store the file somewhere while waiting for media
+                            let needed_media = Vec::<String>::new(); // ! change with parsing output
+                            let text_filename = match req.request_type {
+                                RequestType::TextRequest(filename, _) => filename,
+                                _ => {
+                                    println!(
+                                        "Response is not coherent with request, dropping request"
+                                    );
+                                    return;
+                                }
+                            };
+                            // store the file while waiting for media
+                            self.stored_files
+                            .insert(text_filename.clone(), Some(file));
+
+                            needed_media.iter().for_each(|media_filename| {
+                                // store every media in stored_files as (filename, None)
+                                self.stored_files.insert(media_filename.clone(), None);
+                            });
+                            // store media and text files links
+                            self.text_media_map.insert(text_filename.clone(), needed_media);
+
+                            // create media list request
+                            self.nodes_type
+                                .iter()
+                                .filter(|(_, t)| **t == GraphNodeType::Media)
+                                .map(|(id, _)| *id)
+                                .collect::<Vec<NodeId>>()
+                                .iter()
+                                .for_each(|id| {
+                                    self.create_request(RequestType::MediaListRequest(*id))
+                                });
                         } else {
                             // TODO maybe send to scl a vec<string> if media are not embedded
                             let _ = self
@@ -849,13 +884,29 @@ impl WebBrowser {
             }
             Response::Media(resp) => {
                 match resp {
-                    MediaResponse::MediaList(vec) => {
-                        todo!()
+                    MediaResponse::MediaList(file_list) => {
                         // check if medialist constains one of the media I need and ask for it
+                        for filename in file_list{
+                            if self.stored_files.get(&filename).is_none(){
+                                self.create_request(RequestType::MediaRequest(filename, req.server_id));
+                            }
+                        }
                     }
-                    MediaResponse::Media(vec) => {
-                        todo!()
+                    MediaResponse::Media(file) => {
                         // put the media together with its text file and, if no more media are needed, send to scl
+                        let media_filename = match req.request_type {
+                            RequestType::MediaRequest(filename, _) => filename,
+                            _ => {
+                                println!(
+                                    "Response is not coherent with request, dropping request"
+                                );
+                                return;
+                            }
+                        };
+                        // ! change conversion whne type of file is fixed
+                        let file = String::from_utf8(file).unwrap();
+
+                        self.stored_files.entry(media_filename.clone()).and_modify(|opt_file| *opt_file = Some(file));
                     }
                 }
             }
@@ -878,11 +929,11 @@ impl WebBrowser {
             }
 
             ClientCommand::AskListOfFiles(server_id) => {
-                self.create_request(RequestType::ListOfFile(server_id));
+                self.create_request(RequestType::TextListRequest(server_id));
             }
 
             ClientCommand::AskServersTypes => {
-                self.create_request(RequestType::ServersType);
+                self.create_request(RequestType::ServersTypeRequest);
             }
 
             ClientCommand::RequestFile(filename, server_id) => {
@@ -927,7 +978,7 @@ impl WebBrowser {
     ) {
         println!("Adding request");
 
-        let mut new_request = Request::new(
+        let mut new_request = WebBrowserRequest::new(
             self.packet_id_counter.get_request_id(),
             server_id,
             HashMap::new(),
@@ -965,16 +1016,25 @@ impl WebBrowser {
         let compression: Compression = Compression::None; // TODO has to be chosen by scl or randomically
 
         match &request_type {
-            RequestType::ListOfFile(server_id) => {
+            RequestType::TextListRequest(server_id) => {
                 let frags =
-                    web_messages::RequestMessage::new_text_list_request(self.id, compression.clone())
+                    web_messages::RequestMessage::new_text_list_request(self.id, Compression::None)
                         .fragment()
                         .expect("Error during fragmentation. This can't happen. If it happens there is a bug somwhere");
 
                 self.add_request(*server_id, compression, frags, request_type);
             }
 
-            RequestType::ServersType => {
+            RequestType::MediaListRequest(server_id) => {
+                let frags =
+                    web_messages::RequestMessage::new_media_list_request(self.id, Compression::None)
+                        .fragment()
+                        .expect("Error during fragmentation. This can't happen. If it happens there is a bug somwhere");
+
+                self.add_request(*server_id, compression, frags, request_type);
+            }
+
+            RequestType::ServersTypeRequest => {
                 let frags = RequestMessage::new_type_request(self.id, compression.clone())
                 .fragment()
                 .expect("Error during fragmentation. This can't happen. If it happens there is a bug somwhere");
