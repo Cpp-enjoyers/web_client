@@ -344,7 +344,7 @@ impl Client for WebBrowser {
             }
 
             // check if there exist a text file that has all the media files available
-            
+
 
             select_biased! {
                 recv(self.controller_recv) -> command => {
@@ -1072,6 +1072,7 @@ impl WebBrowser {
 
             RequestType::TextRequest(filename, server_id) => {
                 if !self.is_correct_server_type(*server_id, GraphNodeType::Text) {
+                    println!("client {} - cannot ask for file because it is not a text file", self.id);
                     let _ = self.controller_send.send(ClientEvent::UnsupportedRequest);
                     return;
                 }
