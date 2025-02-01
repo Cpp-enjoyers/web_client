@@ -1,17 +1,16 @@
 use common::slc_commands::{ClientCommand, ClientEvent, ServerType};
 use core::time;
-use crossbeam_channel::{select, select_biased, Receiver, Sender};
+use crossbeam_channel::{select_biased, Receiver, Sender};
 use petgraph::algo::astar;
 use petgraph::prelude::DiGraphMap;
 use std::collections::{HashMap, VecDeque};
-use std::hash::Hash;
 use std::thread::sleep;
 use wg_2024::network::{NodeId, SourceRoutingHeader};
 use wg_2024::packet::*;
 
 use common::networking::flooder::Flooder;
 use common::ring_buffer::RingBuffer;
-use common::web_messages::{Request, *};
+use common::web_messages::*;
 use common::Client;
 use common::{slc_commands, web_messages};
 use compression::lzw::LZWCompressor;
@@ -31,9 +30,9 @@ enum GraphNodeType {
     Client,
     Drone,
 }
-impl Into<GraphNodeType> for ServerType {
-    fn into(self) -> GraphNodeType {
-        match self {
+impl From<ServerType> for GraphNodeType {
+    fn from(value: ServerType) -> Self {
+        match value {
             ServerType::ChatServer => GraphNodeType::Chat,
             ServerType::FileServer => GraphNodeType::Text,
             ServerType::MediaServer => GraphNodeType::Media,
@@ -171,13 +170,13 @@ impl Fragmentable for ResponseMessage {
 
 const RING_BUFF_SZ: usize = 64;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum RequestType {
-    TextListRequest(NodeId),
-    MediaListRequest(NodeId),
-    ServersTypeRequest,
-    TextRequest(String, NodeId),
-    MediaRequest(String, NodeId),
+    TextList(NodeId),
+    MediaList(NodeId),
+    ServersType,
+    Text(String, NodeId),
+    Media(String, NodeId),
 }
 
 #[derive(Debug, Clone)]
@@ -225,7 +224,7 @@ pub struct WebBrowser {
     nodes_type: HashMap<NodeId, GraphNodeType>,
     waiting_for_flood: VecDeque<(PacketId, Fragment)>, // stores the outgoing fragment for which I couldn't find a path or I received a NACK back instead of ACK
     text_media_map: HashMap<String, Vec<String>>, // links a text filename to the media filenames that it requires
-    stored_files: HashMap<String, Vec<u8>>, // filename -> file
+    stored_files: HashMap<String, Vec<u8>>,       // filename -> file
 }
 
 impl Flooder for WebBrowser {
@@ -260,7 +259,7 @@ impl Flooder for WebBrowser {
     }
 
     fn send_to_controller(&self, p: Packet) {
-        self.controller_send
+        let _ = self.controller_send
             .send(slc_commands::ClientEvent::Shortcut(p));
     }
 }
@@ -332,7 +331,6 @@ impl Client for WebBrowser {
                             self.send_packet(packet, channel);
                             continue;
                         } else {
-                            println!("else");
                             self.waiting_for_flood
                                 .push_back((PacketId::from_u64(packet.session_id), frag));
                         }
@@ -347,27 +345,21 @@ impl Client for WebBrowser {
 
             // check if there exist a text file that has all the media files available,
             // send response and clear the relative entries
-            if let Some(key) = self.text_media_map.iter().find(|(_, list)| {
-                for f in *list{
-                    if self.stored_files.get(f).is_none(){
-                        return false;
+            if let Some(key) = self
+                .text_media_map
+                .iter()
+                .find(|(_, list)| {
+                    for f in *list {
+                        if self.stored_files.contains_key(f) {
+                            return false;
+                        }
                     }
-                }
-                true
-            }).and_then(|(key, _)| Some(key.clone()) )
+                    true
+                })
+                .map(|(key, _)| key.clone())
             {
-                if let Some(media_list) = self.text_media_map.remove(&key){
-                    let mut file_list: Vec<Vec<u8>> = vec![];
-                    // ! unwrap should be safe at this point
-                    file_list.push(self.stored_files.remove(&key).unwrap());
-                    for media in media_list{
-                        file_list.push(self.stored_files.remove(&media).unwrap());
-                    }
-                    self.controller_send.send(ClientEvent::FileFromClient(file_list, 0));
-                }
-
+                self.send_text_and_media_back(key);
             }
-
 
             select_biased! {
                 recv(self.controller_recv) -> command => {
@@ -386,10 +378,26 @@ impl Client for WebBrowser {
 }
 
 impl WebBrowser {
+    fn send_text_and_media_back(&mut self, key: String) {
+        if let Some(media_list) = self.text_media_map.remove(&key) {
+            let mut file_list: Vec<Vec<u8>> = vec![];
+            // ! unwrap should be safe at this point
+            file_list.push(self.stored_files.remove(&key).unwrap());
+            for media in media_list {
+                file_list.push(self.stored_files.remove(&media).unwrap());
+            }
+            let _ = self.controller_send
+            // ! self.id should be server_id that requested the text file
+                .send(ClientEvent::FileFromClient(file_list, self.id));
+        } else {
+            println!("ddd");
+        }
+    }
     fn shortcut(&self, packet: Packet) {
         //packet.routing_header.decrease_hop_index();
         match packet.routing_header.destination() {
             Some(_) => {
+                // ! refactor: function that prints error of this fails
                 self.controller_send.send(ClientEvent::Shortcut(packet));
             }
             None => {
@@ -800,6 +808,29 @@ impl WebBrowser {
         }
     }
 
+    fn get_media_inside_text_file(&self, file_str: &str) -> Vec<String> {
+        let document = scraper::Html::parse_document(file_str);
+        let mut ret = vec![];
+        if let Ok(selector) = scraper::Selector::parse(r#"img"#) {
+            for path in document.select(&selector) {
+                if let Some(path) = path.value().attr("src") {
+                    let filename = self.get_filename_from_path(path);
+                    if !filename.is_empty() {
+                        ret.push(filename);
+                    }
+                }
+            }
+        }
+        ret
+    }
+
+    fn get_filename_from_path(&self, path: &str) -> String {
+        if let Some(filename) = path.split("/").collect::<Vec<&str>>().last() {
+            return filename.to_string();
+        }
+        String::new()
+    }
+
     fn complete_request(&mut self, mut req: WebBrowserRequest) {
         println!(
             "Client {}, completing req (from: {:?}, {:?}, to: {:?})",
@@ -867,10 +898,11 @@ impl WebBrowser {
                     TextResponse::Text(file) => {
                         let file_str = String::from_utf8(file.clone()).unwrap();
 
-                        if file_str.contains("<img>") {
-                            let needed_media = Vec::<String>::new(); // ! change with parsing output
+                        let needed_media = self.get_media_inside_text_file(&file_str);
+
+                        if !needed_media.is_empty() {
                             let text_filename = match req.request_type {
-                                RequestType::TextRequest(filename, _) => filename,
+                                RequestType::Text(filename, _) => filename,
                                 _ => {
                                     println!(
                                         "Response is not coherent with request, dropping request"
@@ -878,16 +910,18 @@ impl WebBrowser {
                                     return;
                                 }
                             };
-                            // store the file while waiting for media
-                            self.stored_files
-                            .insert(text_filename.clone(), file);
 
+                            // store the file while waiting for media
+                            self.stored_files.insert(text_filename.clone(), file);
+
+                            // store every media in stored_files as (filename, empty Vec)
                             needed_media.iter().for_each(|media_filename| {
-                                // store every media in stored_files as (filename, None)
                                 self.stored_files.insert(media_filename.clone(), Vec::new());
                             });
+
                             // store media and text files links
-                            self.text_media_map.insert(text_filename.clone(), needed_media);
+                            self.text_media_map
+                                .insert(text_filename.clone(), needed_media);
 
                             // create media list request
                             self.nodes_type
@@ -897,7 +931,7 @@ impl WebBrowser {
                                 .collect::<Vec<NodeId>>()
                                 .iter()
                                 .for_each(|id| {
-                                    self.create_request(RequestType::MediaListRequest(*id))
+                                    self.create_request(RequestType::MediaList(*id))
                                 });
                         } else {
                             // TODO maybe send to scl a vec<string> if media are not embedded
@@ -912,25 +946,29 @@ impl WebBrowser {
                 match resp {
                     MediaResponse::MediaList(file_list) => {
                         // check if medialist constains one of the media I need and ask for it
-                        for filename in file_list{
-                            if self.stored_files.get(&filename).is_none(){
-                                self.create_request(RequestType::MediaRequest(filename, req.server_id));
+                        for filename in file_list {
+                            let filename = self.get_filename_from_path(&filename);
+                            if self.stored_files.contains_key(&filename) {
+                                self.create_request(RequestType::Media(
+                                    filename,
+                                    req.server_id,
+                                ));
                             }
                         }
                     }
                     MediaResponse::Media(file) => {
                         // put the media together with its text file and, if no more media are needed, send to scl
                         let media_filename = match req.request_type {
-                            RequestType::MediaRequest(filename, _) => filename,
+                            RequestType::Media(filename, _) => filename,
                             _ => {
-                                println!(
-                                    "Response is not coherent with request, dropping request"
-                                );
+                                println!("Response is not coherent with request, dropping request");
                                 return;
                             }
                         };
 
-                        self.stored_files.entry(media_filename.clone()).and_modify(|content| *content = file);
+                        self.stored_files
+                            .entry(media_filename.clone())
+                            .and_modify(|content| *content = file);
                     }
                 }
             }
@@ -953,15 +991,15 @@ impl WebBrowser {
             }
 
             ClientCommand::AskListOfFiles(server_id) => {
-                self.create_request(RequestType::TextListRequest(server_id));
+                self.create_request(RequestType::TextList(server_id));
             }
 
             ClientCommand::AskServersTypes => {
-                self.create_request(RequestType::ServersTypeRequest);
+                self.create_request(RequestType::ServersType);
             }
 
             ClientCommand::RequestFile(filename, server_id) => {
-                self.create_request(RequestType::TextRequest(filename, server_id))
+                self.create_request(RequestType::Text(filename, server_id))
             }
 
             ClientCommand::Shortcut(packet) => self.handle_packet(packet),
@@ -1040,7 +1078,7 @@ impl WebBrowser {
         let compression: Compression = Compression::None; // TODO has to be chosen by scl or randomically
 
         match &request_type {
-            RequestType::TextListRequest(server_id) => {
+            RequestType::TextList(server_id) => {
                 let frags =
                     web_messages::RequestMessage::new_text_list_request(self.id, Compression::None)
                         .fragment()
@@ -1049,7 +1087,7 @@ impl WebBrowser {
                 self.add_request(*server_id, compression, frags, request_type);
             }
 
-            RequestType::MediaListRequest(server_id) => {
+            RequestType::MediaList(server_id) => {
                 let frags =
                     web_messages::RequestMessage::new_media_list_request(self.id, Compression::None)
                         .fragment()
@@ -1058,7 +1096,7 @@ impl WebBrowser {
                 self.add_request(*server_id, compression, frags, request_type);
             }
 
-            RequestType::ServersTypeRequest => {
+            RequestType::ServersType => {
                 let frags = RequestMessage::new_type_request(self.id, compression.clone())
                 .fragment()
                 .expect("Error during fragmentation. This can't happen. If it happens there is a bug somwhere");
@@ -1080,7 +1118,7 @@ impl WebBrowser {
                 }
             }
 
-            RequestType::MediaRequest(filename, server_id) => {
+            RequestType::Media(filename, server_id) => {
                 if !self.is_correct_server_type(*server_id, GraphNodeType::Media) {
                     let _ = self.controller_send.send(ClientEvent::UnsupportedRequest);
                     return;
@@ -1094,9 +1132,12 @@ impl WebBrowser {
                 self.add_request(*server_id, compression, frags, request_type);
             }
 
-            RequestType::TextRequest(filename, server_id) => {
+            RequestType::Text(filename, server_id) => {
                 if !self.is_correct_server_type(*server_id, GraphNodeType::Text) {
-                    println!("client {} - cannot ask for file because it is not a text file", self.id);
+                    println!(
+                        "client {} - cannot ask for file because it is not a text file",
+                        self.id
+                    );
                     let _ = self.controller_send.send(ClientEvent::UnsupportedRequest);
                     return;
                 }

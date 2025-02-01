@@ -1,3 +1,41 @@
+use common::web_messages::{ResponseMessage, Serializable};
+use compression::{lzw::LZWCompressor, Compressor};
+use wg_2024::packet::{Fragment, FRAGMENT_DSIZE};
+
+fn simulate_server_compression(before: ResponseMessage) -> Vec<Fragment> {
+    let bytes = LZWCompressor::new()
+        .compress(before.serialize().unwrap())
+        .unwrap()
+        .serialize()
+        .unwrap();
+
+    let chunks: std::slice::Chunks<'_, u8> = bytes.chunks(FRAGMENT_DSIZE);
+    let n_frag = chunks.len();
+
+    let mut ret = vec![];
+
+    for c in chunks {
+        let data = match <[u8; FRAGMENT_DSIZE]>::try_from(c) {
+            Ok(arr) => arr,
+            Err(_) => {
+                let mut ret: [u8; FRAGMENT_DSIZE] = [0; FRAGMENT_DSIZE];
+
+                ret[..c.len()].copy_from_slice(c);
+
+                ret
+            }
+        };
+
+        ret.push(Fragment {
+            fragment_index: ret.len() as u64,
+            total_n_fragments: n_frag as u64,
+            length: c.len() as u8,
+            data,
+        });
+    }
+    ret
+}
+
 #[cfg(test)]
 mod web_client_tests {
     use itertools::Itertools;
@@ -9,7 +47,7 @@ mod web_client_tests {
     use petgraph::prelude::GraphMap;
     use wg_2024::{controller::DroneCommand, drone::Drone};
 
-    use crate::*;
+    use crate::{web_client_test::simulate_server_compression, *};
 
     const MS500: Duration = Duration::from_millis(500);
 
@@ -1453,10 +1491,13 @@ mod web_client_tests {
         ));
 
         // send my file
-        let data =
-            web_messages::ResponseMessage::new_text_response(21, Compression::None, file.as_bytes().to_vec())
-                .fragment()
-                .unwrap();
+        let data = web_messages::ResponseMessage::new_text_response(
+            21,
+            Compression::None,
+            file.as_bytes().to_vec(),
+        )
+        .fragment()
+        .unwrap();
         let n_frags = data.len();
         let mut packet_id = PacketId::from_u64(1);
 
@@ -1505,6 +1546,182 @@ mod web_client_tests {
         } else {
             assert!(false)
         }
+    }
+
+    #[test]
+    pub fn file_request_one_media() {
+        // client 1 <--> 21 server
+
+        // Client 1 channels
+        let (c_send, c_recv) = unbounded();
+        // SC - needed to not make the drone crash
+        let (c_event_send, c_event_recv) = unbounded();
+        let (c_command_send, c_command_recv) = unbounded();
+        // Server
+        let (s_send, s_recv) = unbounded();
+
+        let mut client = WebBrowser::new(
+            1,
+            c_event_send.clone(),
+            c_command_recv.clone(),
+            c_recv.clone(),
+            HashMap::from([(21, s_send.clone())]),
+        );
+        client.topology_graph = GraphMap::from_edges([(1, 21, 1), (21, 1, 1)]);
+        client.nodes_type = HashMap::from([(21, GraphNodeType::Media)]);
+        client.packet_id_counter = PacketId::from_u64(1);
+
+        let html = ResponseMessage::new_text_response(
+            21,
+            Compression::LZW,
+            "<html><img src=\"a/b/c/media.jpg\"/>".as_bytes().to_vec(),
+        );
+        let ret = simulate_server_compression(html.clone());
+        let req = WebBrowserRequest {
+            request_id: 0,
+            server_id: 21,
+            waiting_for_ack: HashMap::new(),
+            incoming_messages: ret,
+            compression: Compression::LZW,
+            request_type: RequestType::Text("file1.html".to_string(), 21),
+            response_is_complete: true,
+        };
+
+        client.complete_request(req);
+
+        assert_eq!(
+            client.stored_files.get("file1.html").unwrap(),
+            &"<html><img src=\"a/b/c/media.jpg\"/>".as_bytes().to_vec()
+        );
+        assert_eq!(client.stored_files.get("media.jpg").unwrap(), &vec![]);
+        assert_eq!(
+            client.text_media_map.get("file1.html").unwrap(),
+            &vec!["media.jpg".to_string()]
+        );
+
+        // media file list request
+        assert_eq!(
+            s_recv.recv().unwrap(),
+            Packet::new_fragment(
+                SourceRoutingHeader::with_first_hop(vec![1, 21]),
+                1,
+                RequestMessage::new_media_list_request(1, Compression::None)
+                    .fragment()
+                    .unwrap()
+                    .get(0)
+                    .unwrap()
+                    .clone()
+            )
+        );
+        // ack
+        client.pending_requests.get_mut(0).unwrap().waiting_for_ack = HashMap::new();
+
+        // media file list response
+        let mut id = PacketId::from_u64(1);
+        id.increment_packet_id();
+        client.handle_packet(Packet::new_fragment(
+            SourceRoutingHeader::with_first_hop(vec![21, 1]),
+            id.get_session_id(),
+            ResponseMessage::new_media_list_response(
+                21,
+                Compression::None,
+                vec!["a.mp3".to_string(), "media.jpg".to_string()],
+            )
+            .fragment()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .clone(),
+        ));
+        let req = client.pending_requests.pop().unwrap();
+
+        client.complete_request(req);
+
+        assert_eq!(
+            client.pending_requests.get(0).unwrap().request_type,
+            RequestType::Media("media.jpg".to_string(), 21)
+        );
+        s_recv.recv().unwrap();
+        assert_eq!(
+            s_recv.recv().unwrap(),
+            Packet::new_fragment(
+                SourceRoutingHeader::with_first_hop(vec![1, 21]),
+                2,
+                RequestMessage::new_media_request(1, Compression::None, "media.jpg".to_string())
+                    .fragment()
+                    .unwrap()
+                    .get(0)
+                    .unwrap()
+                    .clone()
+            )
+        );
+        // ack
+        client.pending_requests.get_mut(0).unwrap().waiting_for_ack = HashMap::new();
+
+        // media file response
+        let mut id = PacketId::from_u64(2);
+        id.increment_packet_id();
+        client.handle_packet(Packet::new_fragment(
+            SourceRoutingHeader::with_first_hop(vec![21, 1]),
+            id.get_session_id(),
+            ResponseMessage::new_media_response(21, Compression::None, vec![1, 2, 3, 4, 5])
+                .fragment()
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .clone(),
+        ));
+
+        let req = client.pending_requests.pop().unwrap();
+        client.complete_request(req);
+        client.send_text_and_media_back("file1.html".to_string());
+
+        // remove packetsetn event from queue
+        c_event_recv.recv().unwrap();
+        c_event_recv.recv().unwrap();
+        c_event_recv.recv().unwrap();
+        c_event_recv.recv().unwrap();
+        assert_eq!(
+            c_event_recv.recv().unwrap(),
+            ClientEvent::FileFromClient(
+                vec![
+                    "<html><img src=\"a/b/c/media.jpg\"/>".as_bytes().to_vec(),
+                    vec![1, 2, 3, 4, 5]
+                ],
+                1
+            )
+        );
+    }
+
+    #[test]
+    fn file_parsing() {
+        let (_c, c_recv) = unbounded();
+        let (c_event_send, _b) = unbounded();
+        let (_a, c_command_recv) = unbounded();
+
+        let client = WebBrowser::new(
+            1,
+            c_event_send.clone(),
+            c_command_recv.clone(),
+            c_recv.clone(),
+            HashMap::new(),
+        );
+
+        assert_eq!(
+            client.get_media_inside_text_file(&"suhbefuiwfbwob".to_string()),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            client
+                .get_media_inside_text_file(&"-----------<img src=\"youtube.com\"\\>".to_string()),
+            vec!["youtube.com".to_string()]
+        );
+        assert_eq!(
+            client.get_media_inside_text_file(
+                &"-----------<img src=\"/usr/tmp/fodler/subfolder/pic.jpg\"\\>".to_string()
+            ),
+            vec!["pic.jpg".to_string()]
+        );
     }
 
     /*
@@ -1742,7 +1959,7 @@ mod fragmentation_tests {
     use compression::{lzw::LZWCompressor, Compressor};
     use wg_2024::packet::{Fragment, FRAGMENT_DSIZE};
 
-    use crate::Fragmentable;
+    use crate::{web_client_test::simulate_server_compression, Fragmentable};
 
     #[test]
     fn invalid_request_response() {
@@ -1874,38 +2091,12 @@ Pellentesque eget elit vulputate, eleifend arcu eu, maximus risus. Donec vitae s
 
     #[test]
     fn text_response_compressed() {
-        let before =
-            ResponseMessage::new_text_response(21, Compression::LZW, "abcdefgh.".as_bytes().to_vec());
-        let bytes = LZWCompressor::new()
-            .compress(before.serialize().unwrap())
-            .unwrap()
-            .serialize()
-            .unwrap();
-
-        let chunks: std::slice::Chunks<'_, u8> = bytes.chunks(FRAGMENT_DSIZE);
-        let n_frag = chunks.len();
-
-        let mut ret = vec![];
-
-        for c in chunks {
-            let data = match <[u8; FRAGMENT_DSIZE]>::try_from(c) {
-                Ok(arr) => arr,
-                Err(_) => {
-                    let mut ret: [u8; FRAGMENT_DSIZE] = [0; FRAGMENT_DSIZE];
-
-                    ret[..c.len()].copy_from_slice(c);
-
-                    ret
-                }
-            };
-
-            ret.push(Fragment {
-                fragment_index: ret.len() as u64,
-                total_n_fragments: n_frag as u64,
-                length: c.len() as u8,
-                data,
-            });
-        }
+        let before = ResponseMessage::new_text_response(
+            21,
+            Compression::LZW,
+            "abcdefgh.".as_bytes().to_vec(),
+        );
+        let ret = simulate_server_compression(before.clone());
 
         let after = ResponseMessage::defragment(&ret, Compression::LZW).unwrap();
 
