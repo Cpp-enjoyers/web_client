@@ -259,8 +259,7 @@ impl Flooder for WebBrowser {
     }
 
     fn send_to_controller(&self, p: Packet) {
-        let _ = self.controller_send
-            .send(slc_commands::ClientEvent::Shortcut(p));
+        self.internal_send_to_controller(ClientEvent::Shortcut(p));
     }
 }
 
@@ -303,63 +302,10 @@ impl Client for WebBrowser {
 
         loop {
             // complete request
-            if let Some(i) = self
-                .pending_requests
-                .iter()
-                .position(|req| req.response_is_complete && req.waiting_for_ack.is_empty())
-            {
-                let req = self.pending_requests.remove(i);
-                self.complete_request(req);
-            }
+            self.try_complete_request();
 
             // try sending a packet that received a NACK
-            if let Some((id, frag)) = self.waiting_for_flood.pop_front() {
-                match self
-                    .pending_requests
-                    .iter()
-                    .find(|req| req.request_id == id.get_request_id())
-                {
-                    Some(req) => {
-                        let p = Packet::new_fragment(
-                            SourceRoutingHeader::empty_route(),
-                            id.get_session_id(),
-                            frag.clone(),
-                        );
-
-                        let (packet, channel) = self.prepare_packet_routing(p, req.server_id);
-                        if let Some(channel) = channel {
-                            self.send_packet(packet, channel);
-                            continue;
-                        } else {
-                            self.waiting_for_flood
-                                .push_back((PacketId::from_u64(packet.session_id), frag));
-                        }
-                    }
-
-                    None => {
-                        println!("client {} - Found a packet in waiting_for_flood without the corresponding request. BUG", self.id);
-                        unreachable!()
-                    }
-                }
-            }
-
-            // check if there exist a text file that has all the media files available,
-            // send response and clear the relative entries
-            if let Some(key) = self
-                .text_media_map
-                .iter()
-                .find(|(_, list)| {
-                    for f in *list {
-                        if self.stored_files.contains_key(f) {
-                            return false;
-                        }
-                    }
-                    true
-                })
-                .map(|(key, _)| key.clone())
-            {
-                self.send_text_and_media_back(key);
-            }
+            self.try_resend_packet();
 
             select_biased! {
                 recv(self.controller_recv) -> command => {
@@ -378,6 +324,70 @@ impl Client for WebBrowser {
 }
 
 impl WebBrowser {
+    fn internal_send_to_controller(&self, msg: ClientEvent){
+        if let Err(e) = self.controller_send.send(msg) {
+            println!("client {} - cannot send to scl: {e:?}", self.id);
+        }
+    }
+
+    fn try_resend_packet(&mut self){
+        if let Some((id, frag)) = self.waiting_for_flood.pop_front() {
+            match self
+                .pending_requests
+                .iter()
+                .find(|req| req.request_id == id.get_request_id())
+            {
+                Some(req) => {
+                    let p = Packet::new_fragment(
+                        SourceRoutingHeader::empty_route(),
+                        id.get_session_id(),
+                        frag.clone(),
+                    );
+
+                    let (packet, channel) = self.prepare_packet_routing(p, req.server_id);
+                    if let Some(channel) = channel {
+                        self.send_packet(packet, channel);
+                    } else {
+                        self.waiting_for_flood
+                            .push_back((PacketId::from_u64(packet.session_id), frag));
+                    }
+                }
+
+                None => {
+                    println!("client {} - Found a packet in waiting_for_flood without the corresponding request. BUG", self.id);
+                    unreachable!()
+                }
+            }
+        }
+    }
+
+    fn try_complete_request(&mut self){
+        if let Some(i) = self
+            .pending_requests
+            .iter()
+            .position(|req| req.response_is_complete && req.waiting_for_ack.is_empty())
+        {
+            let req = self.pending_requests.remove(i);
+            self.complete_request(req);
+        }
+
+        if let Some(key) = self
+            .text_media_map
+            .iter()
+            .find(|(_, list)| {
+                for f in *list {
+                    if self.stored_files.contains_key(f) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .map(|(key, _)| key.clone())
+        {
+            self.send_text_and_media_back(key);
+        }
+    }
+
     fn send_text_and_media_back(&mut self, key: (NodeId, String)) {
         if let Some(media_list) = self.text_media_map.remove(&key) {
             let mut file_list: Vec<Vec<u8>> = vec![];
@@ -393,12 +403,12 @@ impl WebBrowser {
             println!("ddd");
         }
     }
+
     fn shortcut(&self, packet: Packet) {
         //packet.routing_header.decrease_hop_index();
         match packet.routing_header.destination() {
             Some(_) => {
-                // ! refactor: function that prints error of this fails
-                self.controller_send.send(ClientEvent::Shortcut(packet));
+                self.internal_send_to_controller(ClientEvent::Shortcut(packet));
             }
             None => {
                 println!("Client {} - Packet doesn't contain a destination, unable to shortcut, dropping", self.id);
@@ -413,71 +423,6 @@ impl WebBrowser {
         match channel.send(packet.clone()) {
             Ok(()) => println!("client {} - sent {:?}", self.id, packet.clone()),
             Err(e) => println!("client {} - {e}", self.id),
-        }
-    }
-
-    fn send_nack(&self, packet: Packet, nack_type: NackType) {
-        match packet.pack_type {
-            // send original packet to simulation controller
-            PacketType::Nack(_) | PacketType::Ack(_) | PacketType::FloodResponse(_) => {
-                self.shortcut(packet);
-            }
-            // Send nack back
-            PacketType::MsgFragment(f) => {
-                let mut source_header: SourceRoutingHeader = match packet
-                    .routing_header
-                    .sub_route(0..packet.routing_header.hop_index)
-                {
-                    Some(sh) => sh,
-                    None => {
-                        println!("client {} - header is too short to be reversed to route the nack, dropping", self.id);
-                        return;
-                    }
-                };
-                source_header.reset_hop_index();
-                source_header.reverse();
-                source_header.hop_index = 1;
-
-                if source_header.hops.len() < 2 {
-                    println!("client {} - reversed header is too short to be used to route the nack, dropping", self.id);
-                    return;
-                }
-
-                let current_hop = match source_header.current_hop() {
-                    Some(id) => id,
-                    None => {
-                        println!(
-                            "client {} - reversed header doesn't contain the next hop, dropping",
-                            self.id
-                        );
-                        return;
-                    }
-                };
-
-                match self.packet_send.get(&current_hop) {
-                    Some(channel) => {
-                        let nack: Packet = Packet::new_nack(
-                            source_header,
-                            packet.session_id,
-                            Nack {
-                                fragment_index: f.fragment_index,
-                                nack_type,
-                            },
-                        );
-                        let _ = self
-                            .controller_send
-                            .send(ClientEvent::PacketSent(nack.clone()));
-                        let _ = channel.send(nack);
-                    }
-
-                    None => {
-                        println!("client {} - Fragment has arrived to me but it can't go back. BUG, dropping", self.id);
-                    }
-                };
-            }
-            PacketType::FloodRequest(_) => {
-                unreachable!()
-            }
         }
     }
 
@@ -528,24 +473,6 @@ impl WebBrowser {
         }
 
         (packet, None)
-    }
-
-    fn check_routing_header(&self, header: &SourceRoutingHeader) -> Option<NackType> {
-        if header
-            .current_hop()
-            .is_none_or(|next_id| next_id != self.id)
-        {
-            return Some(NackType::UnexpectedRecipient(self.id));
-        }
-
-        if header
-            .next_hop()
-            .is_none_or(|next_id| next_id != self.id && !self.packet_send.contains_key(&next_id))
-        {
-            return Some(NackType::ErrorInRouting(header.next_hop().unwrap()));
-        }
-
-        None
     }
 
     fn client_is_destination(&self, p: &Packet) -> bool {
@@ -687,6 +614,10 @@ impl WebBrowser {
                 println!("client {} - I received a fragment for req_id \"{}\" that it's unknown to me, dropping", self.id, PacketId::from_u64(packet.session_id).get_request_id());
             }
         }
+    }
+
+    fn handle_nack(&mut self, p: Packet, nack: &Nack){
+
     }
 
     fn handle_packet(&mut self, packet: Packet) {
@@ -865,15 +796,15 @@ impl WebBrowser {
                                     _ => {}
                                 }
                             }
-                            let _ = self.controller_send.send(ClientEvent::ServersTypes(list));
+                            self.internal_send_to_controller(ClientEvent::ServersTypes(list));
                         }
                     }
                     GenericResponse::InvalidRequest => {
-                        let _ = self.controller_send.send(ClientEvent::UnsupportedRequest);
+                        self.internal_send_to_controller(ClientEvent::UnsupportedRequest);
                     }
                     GenericResponse::NotFound => {
                         // ! add apposite clientevent
-                        let _ = self.controller_send.send(ClientEvent::UnsupportedRequest);
+                        self.internal_send_to_controller(ClientEvent::UnsupportedRequest);
                     }
                 }
             }
@@ -975,8 +906,10 @@ impl WebBrowser {
             }
 
             ClientCommand::RemoveSender(id) => {
+                println!("client {} - removing sender {}", self.id, id);
                 self.packet_send.remove(&id);
                 self.topology_graph.remove_node(id);
+                println!("client {} - my graph after removing sender is {:?}", self.id, self.topology_graph);
             }
 
             ClientCommand::AskListOfFiles(server_id) => {
@@ -1113,7 +1046,7 @@ impl WebBrowser {
             RequestType::Media(filename, server_id) => {
                 compression = Compression::None;
                 if !self.is_correct_server_type(*server_id, GraphNodeType::Media) {
-                    let _ = self.controller_send.send(ClientEvent::UnsupportedRequest);
+                    self.internal_send_to_controller(ClientEvent::UnsupportedRequest);
                     return;
                 }
 
@@ -1132,7 +1065,7 @@ impl WebBrowser {
                         "client {} - cannot ask for file because it is not a text file",
                         self.id
                     );
-                    let _ = self.controller_send.send(ClientEvent::UnsupportedRequest);
+                    self.internal_send_to_controller(ClientEvent::UnsupportedRequest);
                     return;
                 }
 
