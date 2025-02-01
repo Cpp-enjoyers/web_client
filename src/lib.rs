@@ -616,8 +616,80 @@ impl WebBrowser {
         }
     }
 
-    fn handle_nack(&mut self, p: Packet, nack: &Nack){
+    fn handle_nack(&mut self, packet: Packet, nack: &Nack){
+        if !self.client_is_destination(&packet) {
+            self.shortcut(packet);
+            return;
+        }
 
+        match self.find_request_index(&packet) {
+            Some(id) => {
+                let req = self.pending_requests.get_mut(id).unwrap();
+
+                let fragment = match req
+                    .waiting_for_ack
+                    .get(&PacketId::from_u64(packet.session_id))
+                {
+                    Some(f) => f.clone(),
+                    None => {
+                        println!("client {} - I received a NACK for packet_id \"{}\" that it's unknown to me, dropping", self.id, PacketId::from_u64(packet.session_id).get_packet_id());
+                        return;
+                    }
+                };
+
+                match nack.nack_type {
+                    NackType::Dropped | NackType::DestinationIsDrone => {
+                        // TODO update graph with some metric
+                        let dest = req.server_id;
+                        let p = Packet::new_fragment(
+                            SourceRoutingHeader::empty_route(),
+                            packet.session_id,
+                            fragment.clone(),
+                        );
+
+                        if let (packet, Some(channel)) =
+                            self.prepare_packet_routing(p, dest)
+                        {
+                            self.send_packet(packet, channel);
+                        } else {
+                            self.waiting_for_flood.push_back((
+                                PacketId::from_u64(packet.session_id),
+                                fragment.clone(),
+                            ));
+                            self.start_flooding();
+                        }
+                    }
+
+                    NackType::ErrorInRouting(node_to_remove)
+                    | NackType::UnexpectedRecipient(node_to_remove) => {
+                        // remove problematic drone and search for a new path, if found send. otherwise start a flood
+                        self.topology_graph.remove_node(node_to_remove);
+
+                        // TODO update graph with some metric
+                        let dest = req.server_id;
+                        let p = Packet::new_fragment(
+                            SourceRoutingHeader::empty_route(),
+                            packet.session_id,
+                            fragment.clone(),
+                        );
+                        if let (packet, Some(channel)) =
+                            self.prepare_packet_routing(p, dest)
+                        {
+                            self.send_packet(packet, channel);
+                        } else {
+                            self.waiting_for_flood.push_back((
+                                PacketId::from_u64(packet.session_id),
+                                fragment.clone(),
+                            ));
+                            self.start_flooding();
+                        }
+                    }
+                }
+            }
+            None => {
+                println!("client {} - I received a NACK for req_id \"{}\" that it's unknown to me, dropping", self.id, PacketId::from_u64(packet.session_id).get_request_id());
+            }
+        }
     }
 
     fn handle_packet(&mut self, packet: Packet) {
@@ -637,79 +709,7 @@ impl WebBrowser {
             }
 
             PacketType::Nack(nack) => {
-                if !self.client_is_destination(&packet) {
-                    self.shortcut(packet);
-                    return;
-                }
-
-                match self.find_request_index(&packet) {
-                    Some(id) => {
-                        let req = self.pending_requests.get_mut(id).unwrap();
-
-                        let fragment = match req
-                            .waiting_for_ack
-                            .get(&PacketId::from_u64(packet.session_id))
-                        {
-                            Some(f) => f.clone(),
-                            None => {
-                                println!("client {} - I received a NACK for packet_id \"{}\" that it's unknown to me, dropping", self.id, PacketId::from_u64(packet.session_id).get_packet_id());
-                                return;
-                            }
-                        };
-
-                        match nack.nack_type {
-                            NackType::Dropped | NackType::DestinationIsDrone => {
-                                // TODO update graph with some metric
-                                let dest = req.server_id;
-                                let p = Packet::new_fragment(
-                                    SourceRoutingHeader::empty_route(),
-                                    packet.session_id,
-                                    fragment.clone(),
-                                );
-
-                                if let (packet, Some(channel)) =
-                                    self.prepare_packet_routing(p, dest)
-                                {
-                                    self.send_packet(packet, channel);
-                                } else {
-                                    self.waiting_for_flood.push_back((
-                                        PacketId::from_u64(packet.session_id),
-                                        fragment.clone(),
-                                    ));
-                                    self.start_flooding();
-                                }
-                            }
-
-                            NackType::ErrorInRouting(node_to_remove)
-                            | NackType::UnexpectedRecipient(node_to_remove) => {
-                                // remove problematic drone and search for a new path, if found send. otherwise start a flood
-                                self.topology_graph.remove_node(node_to_remove);
-
-                                // TODO update graph with some metric
-                                let dest = req.server_id;
-                                let p = Packet::new_fragment(
-                                    SourceRoutingHeader::empty_route(),
-                                    packet.session_id,
-                                    fragment.clone(),
-                                );
-                                if let (packet, Some(channel)) =
-                                    self.prepare_packet_routing(p, dest)
-                                {
-                                    self.send_packet(packet, channel);
-                                } else {
-                                    self.waiting_for_flood.push_back((
-                                        PacketId::from_u64(packet.session_id),
-                                        fragment.clone(),
-                                    ));
-                                    self.start_flooding();
-                                }
-                            }
-                        }
-                    }
-                    None => {
-                        println!("client {} - I received a NACK for req_id \"{}\" that it's unknown to me, dropping", self.id, PacketId::from_u64(packet.session_id).get_request_id());
-                    }
-                }
+                self.handle_nack(packet, &nack);
             }
 
             PacketType::MsgFragment(fragment) => {
@@ -754,7 +754,7 @@ impl WebBrowser {
 
     fn complete_request(&mut self, mut req: WebBrowserRequest) {
         println!(
-            "Client {}, completing req (from: {:?}, {:?}, to: {:?})",
+            "Client {}, completing req (id: {:?}, {:?}, to: {:?})",
             self.id, req.request_id, req.request_type, req.server_id
         );
         req.incoming_messages
