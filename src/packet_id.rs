@@ -43,7 +43,7 @@ impl PacketId {
     }
 
     pub fn get_session_id(&self) -> u64 {
-        (self.packet_id << REQ_ID_LEN) | (self.req_id as u64)
+        (self.packet_id << REQ_ID_LEN) | u64::from(self.req_id)
     }
 
     pub fn increment_packet_id(&mut self) {

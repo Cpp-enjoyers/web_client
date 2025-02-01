@@ -1,3 +1,5 @@
+#![warn(clippy::pedantic)]
+
 use common::slc_commands::{ClientCommand, ClientEvent, ServerType};
 use core::time;
 use crossbeam_channel::{select_biased, Receiver, Sender};
@@ -6,13 +8,19 @@ use petgraph::prelude::DiGraphMap;
 use std::collections::{HashMap, VecDeque};
 use std::thread::sleep;
 use wg_2024::network::{NodeId, SourceRoutingHeader};
-use wg_2024::packet::*;
+use wg_2024::packet::{
+    Ack, FloodRequest, FloodResponse, Fragment, Nack, NackType, NodeType, Packet, PacketType,
+    FRAGMENT_DSIZE,
+};
 
 use common::networking::flooder::Flooder;
 use common::ring_buffer::RingBuffer;
-use common::web_messages::*;
+use common::web_messages;
+use common::web_messages::{
+    Compression, GenericResponse, MediaResponse, RequestMessage, Response, ResponseMessage,
+    Serializable, SerializationError, TextResponse,
+};
 use common::Client;
-use common::{slc_commands, web_messages};
 use compression::lzw::LZWCompressor;
 use compression::Compressor;
 
@@ -66,15 +74,14 @@ impl Fragmentable for RequestMessage {
         let n_frag = chunks.len();
 
         for c in chunks {
-            let data = match <[u8; FRAGMENT_DSIZE]>::try_from(c) {
-                Ok(arr) => arr,
-                Err(_) => {
-                    let mut ret: [u8; FRAGMENT_DSIZE] = [0; FRAGMENT_DSIZE];
+            let data = if let Ok(arr) = <[u8; FRAGMENT_DSIZE]>::try_from(c) {
+                arr
+            } else {
+                let mut ret: [u8; FRAGMENT_DSIZE] = [0; FRAGMENT_DSIZE];
 
-                    ret[..c.len()].copy_from_slice(c);
+                ret[..c.len()].copy_from_slice(c);
 
-                    ret
-                }
+                ret
             };
 
             ret.push(Fragment {
@@ -122,15 +129,14 @@ impl Fragmentable for ResponseMessage {
         let n_frag = chunks.len();
 
         for c in chunks {
-            let data = match <[u8; FRAGMENT_DSIZE]>::try_from(c) {
-                Ok(arr) => arr,
-                Err(_) => {
-                    let mut ret: [u8; FRAGMENT_DSIZE] = [0; FRAGMENT_DSIZE];
+            let data = if let Ok(arr) = <[u8; FRAGMENT_DSIZE]>::try_from(c) {
+                arr
+            } else {
+                let mut ret: [u8; FRAGMENT_DSIZE] = [0; FRAGMENT_DSIZE];
 
-                    ret[..c.len()].copy_from_slice(c);
+                ret[..c.len()].copy_from_slice(c);
 
-                    ret
-                }
+                ret
             };
 
             ret.push(Fragment {
@@ -248,15 +254,12 @@ impl Flooder for WebBrowser {
     }
 
     fn insert_flood(&mut self, flood_id: (NodeId, u64)) {
-        match self.flood_history.get_mut(&flood_id.0) {
-            Some(set) => {
-                set.insert(flood_id.1);
-            }
-            None => {
-                let mut rb = RingBuffer::with_capacity(RING_BUFF_SZ);
-                rb.insert(flood_id.1);
-                self.flood_history.insert(flood_id.0, rb);
-            }
+        if let Some(set) = self.flood_history.get_mut(&flood_id.0) {
+            set.insert(flood_id.1);
+        } else {
+            let mut rb = RingBuffer::with_capacity(RING_BUFF_SZ);
+            rb.insert(flood_id.1);
+            self.flood_history.insert(flood_id.0, rb);
         }
     }
 
@@ -296,7 +299,7 @@ impl Client for WebBrowser {
             text_media_map: HashMap::new(),
             stored_files: HashMap::new(),
             media_request_left: HashMap::new(),
-            media_owner: HashMap::new()
+            media_owner: HashMap::new(),
         }
     }
 
@@ -336,31 +339,27 @@ impl WebBrowser {
 
     fn try_resend_packet(&mut self) {
         if let Some((id, frag)) = self.waiting_for_flood.pop_front() {
-            match self
+            if let Some(req) = self
                 .pending_requests
                 .iter()
                 .find(|req| req.request_id == id.get_request_id())
             {
-                Some(req) => {
-                    let p = Packet::new_fragment(
-                        SourceRoutingHeader::empty_route(),
-                        id.get_session_id(),
-                        frag.clone(),
-                    );
+                let p = Packet::new_fragment(
+                    SourceRoutingHeader::empty_route(),
+                    id.get_session_id(),
+                    frag.clone(),
+                );
 
-                    let (packet, channel) = self.prepare_packet_routing(p, req.server_id);
-                    if let Some(channel) = channel {
-                        self.send_packet(packet, channel);
-                    } else {
-                        self.waiting_for_flood
-                            .push_back((PacketId::from_u64(packet.session_id), frag));
-                    }
+                let (packet, channel) = self.prepare_packet_routing(p, req.server_id);
+                if let Some(channel) = channel {
+                    self.send_packet(&packet, channel);
+                } else {
+                    self.waiting_for_flood
+                        .push_back((PacketId::from_u64(packet.session_id), frag));
                 }
-
-                None => {
-                    println!("client {} - Found a packet in waiting_for_flood without the corresponding request. BUG", self.id);
-                    unreachable!()
-                }
+            } else {
+                println!("client {} - Found a packet in waiting_for_flood without the corresponding request. BUG", self.id);
+                unreachable!()
             }
         }
     }
@@ -380,7 +379,12 @@ impl WebBrowser {
             .iter()
             .find(|(_, list)| {
                 for f in *list {
-                    if self.media_owner.get(f).is_some_and(|opt| opt.is_none()) && self.media_request_left.get(f).is_some_and(|r| *r > 0) {
+                    if self
+                        .media_owner
+                        .get(f)
+                        .is_some_and(std::option::Option::is_none)
+                        && self.media_request_left.get(f).is_some_and(|r| *r > 0)
+                    {
                         return false;
                     }
                 }
@@ -388,24 +392,22 @@ impl WebBrowser {
             })
             .map(|(key, _)| key.clone())
         {
-            self.send_text_and_media_back(key);
+            self.send_text_and_media_back(&key);
         }
     }
 
-    fn send_text_and_media_back(&mut self, key: (NodeId, String)) {
-        if let Some(media_list) = self.text_media_map.remove(&key) {
+    fn send_text_and_media_back(&mut self, key: &(NodeId, String)) {
+        if let Some(media_list) = self.text_media_map.remove(key) {
             let mut file_list: Vec<Vec<u8>> = vec![];
             // ! unwrap should be safe at this point
             file_list.push(self.stored_files.remove(&key.1).unwrap());
             for media in media_list {
                 file_list.push(self.stored_files.remove(&media).unwrap());
                 self.media_owner.remove(&media);
-                println!("----{:?}", self.media_owner);
                 self.media_request_left.remove(&media);
             }
-            let _ = self
-                .controller_send
-                .send(ClientEvent::FileFromClient(file_list, key.0));
+
+            self.internal_send_to_controller(ClientEvent::FileFromClient(file_list, key.0));
         }
     }
 
@@ -421,7 +423,7 @@ impl WebBrowser {
         }
     }
 
-    fn send_packet(&self, packet: Packet, channel: &Sender<Packet>) {
+    fn send_packet(&self, packet: &Packet, channel: &Sender<Packet>) {
         let _ = self
             .controller_send
             .send(ClientEvent::PacketSent(packet.clone()));
@@ -443,10 +445,10 @@ impl WebBrowser {
         .map(|(_, path)| wg_2024::network::SourceRoutingHeader::with_first_hop(path))
     }
 
-    fn is_correct_server_type(&self, server_id: NodeId, requested_type: GraphNodeType) -> bool {
+    fn is_correct_server_type(&self, server_id: NodeId, requested_type: &GraphNodeType) -> bool {
         self.nodes_type
             .get(&server_id)
-            .is_some_and(|t| *t == requested_type)
+            .is_some_and(|t| t == requested_type)
     }
 
     /*
@@ -536,23 +538,17 @@ impl WebBrowser {
                 "client: {} - graph: {:?} - nodes type: {:?}",
                 self.id, self.topology_graph, self.nodes_type
             );
-        } else {
-            match packet.routing_header.next_hop() {
-                Some(next_hop_drone_id) => {
-                    if let Some(channel) = self.packet_send.get(&next_hop_drone_id) {
-                        packet.routing_header.increase_hop_index();
-                        self.send_packet(packet, channel);
-                    } else {
-                        // I don't have the channel to forward the packet - SHORTCUT
-                        self.shortcut(packet);
-                    }
-                }
-
-                None => {
-                    println!("client {} - Found a flood response with a corrupted routing header, I don't know who is the next hop nor, consequently, the original initiator to short shortcut this packet. Dropping", self.id);
-                    unreachable!()
-                }
+        } else if let Some(next_hop_drone_id) = packet.routing_header.next_hop() {
+            if let Some(channel) = self.packet_send.get(&next_hop_drone_id) {
+                packet.routing_header.increase_hop_index();
+                self.send_packet(&packet, channel);
+            } else {
+                // I don't have the channel to forward the packet - SHORTCUT
+                self.shortcut(packet);
             }
+        } else {
+            println!("client {} - Found a flood response with a corrupted routing header, I don't know who is the next hop nor, consequently, the original initiator to short shortcut this packet. Dropping", self.id);
+            unreachable!()
         }
     }
 
@@ -582,7 +578,7 @@ impl WebBrowser {
         }
     }
 
-    fn handle_fragment(&mut self, packet: Packet, fragment: Fragment) {
+    fn handle_fragment(&mut self, packet: Packet, fragment: &Fragment) {
         if !self.client_is_destination(&packet) {
             self.shortcut(packet);
             return;
@@ -631,15 +627,14 @@ impl WebBrowser {
             Some(id) => {
                 let req = self.pending_requests.get_mut(id).unwrap();
 
-                let fragment = match req
+                let fragment = if let Some(f) = req
                     .waiting_for_ack
                     .get(&PacketId::from_u64(packet.session_id))
                 {
-                    Some(f) => f.clone(),
-                    None => {
-                        println!("client {} - I received a NACK for packet_id \"{}\" that it's unknown to me, dropping", self.id, PacketId::from_u64(packet.session_id).get_packet_id());
-                        return;
-                    }
+                    f.clone()
+                } else {
+                    println!("client {} - I received a NACK for packet_id \"{}\" that it's unknown to me, dropping", self.id, PacketId::from_u64(packet.session_id).get_packet_id());
+                    return;
                 };
 
                 match nack.nack_type {
@@ -653,7 +648,7 @@ impl WebBrowser {
                         );
 
                         if let (packet, Some(channel)) = self.prepare_packet_routing(p, dest) {
-                            self.send_packet(packet, channel);
+                            self.send_packet(&packet, channel);
                         } else {
                             self.waiting_for_flood.push_back((
                                 PacketId::from_u64(packet.session_id),
@@ -676,7 +671,7 @@ impl WebBrowser {
                             fragment.clone(),
                         );
                         if let (packet, Some(channel)) = self.prepare_packet_routing(p, dest) {
-                            self.send_packet(packet, channel);
+                            self.send_packet(&packet, channel);
                         } else {
                             self.waiting_for_flood.push_back((
                                 PacketId::from_u64(packet.session_id),
@@ -714,7 +709,7 @@ impl WebBrowser {
             }
 
             PacketType::MsgFragment(fragment) => {
-                self.handle_fragment(packet, fragment);
+                self.handle_fragment(packet, &fragment);
             }
         }
     }
@@ -729,7 +724,7 @@ impl WebBrowser {
         let (mut packet, opt_chn) = self.prepare_packet_routing(ack, server_id);
 
         if let Some(channel) = opt_chn {
-            self.send_packet(packet, channel);
+            self.send_packet(&packet, channel);
         } else {
             println!(
                 "client {} - Can't find a path to the node, I need to shortcut ACK",
@@ -740,7 +735,7 @@ impl WebBrowser {
         }
     }
 
-    fn get_media_inside_text_file(&self, file_str: &str) -> Vec<String> {
+    fn get_media_inside_text_file(file_str: &str) -> Vec<String> {
         let document = scraper::Html::parse_document(file_str);
         let mut ret = vec![];
         if let Ok(selector) = scraper::Selector::parse("img") {
@@ -753,166 +748,202 @@ impl WebBrowser {
         ret
     }
 
+    fn complete_request_with_generic_response(
+        &mut self,
+        server_id: NodeId,
+        request_type: RequestType,
+        resp: GenericResponse,
+    ) {
+        match resp {
+            GenericResponse::Type(server_type) => {
+                self.nodes_type
+                    .entry(server_id)
+                    .and_modify(|t| *t = server_type.into());
+
+                // if I discovered all the server type
+                if !self
+                    .nodes_type
+                    .iter()
+                    .any(|(_, t)| matches!(t, GraphNodeType::Server))
+                {
+                    let mut list = HashMap::new();
+                    for (id, t) in &self.nodes_type {
+                        match t {
+                            GraphNodeType::Chat => {
+                                list.insert(*id, ServerType::ChatServer);
+                            }
+                            GraphNodeType::Media => {
+                                list.insert(*id, ServerType::MediaServer);
+                            }
+                            GraphNodeType::Text => {
+                                list.insert(*id, ServerType::FileServer);
+                            }
+                            _ => {}
+                        }
+                    }
+                    self.internal_send_to_controller(ClientEvent::ServersTypes(list));
+                }
+            }
+            GenericResponse::InvalidRequest => {
+                self.internal_send_to_controller(ClientEvent::UnsupportedRequest);
+            }
+            GenericResponse::NotFound => {
+                // ! add apposite clientevent
+                self.internal_send_to_controller(ClientEvent::UnsupportedRequest);
+            }
+        }
+    }
+
+    fn complete_request_with_text_response(
+        &mut self,
+        server_id: NodeId,
+        request_type: RequestType,
+        resp: TextResponse,
+    ) {
+        match resp {
+            TextResponse::TextList(vec) => {
+                println!("sending message to scl {{{:?}}}", vec);
+                self.internal_send_to_controller(ClientEvent::ListOfFiles(vec, server_id));
+            }
+            TextResponse::Text(file) => {
+                let file_str = String::from_utf8(file.clone()).unwrap();
+
+                let needed_media = Self::get_media_inside_text_file(&file_str);
+
+                if needed_media.is_empty() {
+                    self.internal_send_to_controller(ClientEvent::FileFromClient(
+                        vec![file],
+                        server_id,
+                    ));
+                } else {
+                    println!(
+                        "client {} - I need {:?} for this file",
+                        self.id, needed_media
+                    );
+                    let RequestType::Text(text_filename, _) = request_type else {
+                        println!("Response is not coherent with request, dropping request");
+                        return;
+                    };
+
+                    // store the file while waiting for media
+                    self.stored_files.insert(text_filename.clone(), file);
+
+                    // store media and text files links
+                    self.text_media_map
+                        .insert((server_id, text_filename.clone()), needed_media.clone());
+
+                    let mut is_required_media_list_request = false;
+                    // store every media in stored_files as (filename, empty Vec)
+                    for media_filename in needed_media {
+                        // ! refactor
+
+                        if self
+                            .media_owner
+                            .get(&media_filename)
+                            .is_none_or(std::option::Option::is_none)
+                        {
+                            self.stored_files.insert(media_filename.clone(), Vec::new());
+                            self.media_owner.insert(media_filename.clone(), None);
+                            self.media_request_left.insert(
+                                media_filename.clone(),
+                                self.nodes_type
+                                    .iter()
+                                    .filter(|(_, t)| **t == GraphNodeType::Media)
+                                    .count() as u8,
+                            );
+                            is_required_media_list_request = true;
+                        } else {
+                            self.create_request(RequestType::Media(
+                                media_filename.clone(),
+                                self.media_owner.get(&media_filename).unwrap().unwrap(),
+                            ));
+                        }
+                    }
+
+                    if is_required_media_list_request {
+                        // create media list request
+                        self.nodes_type
+                            .iter()
+                            .filter(|(_, t)| **t == GraphNodeType::Media)
+                            .map(|(id, _)| *id)
+                            .collect::<Vec<NodeId>>()
+                            .iter()
+                            .for_each(|id| {
+                                self.create_request(RequestType::MediaList(*id));
+                            });
+                    }
+                }
+            }
+        }
+    }
+
+    fn complete_request_with_media_response(
+        &mut self,
+        server_id: NodeId,
+        request_type: RequestType,
+        resp: MediaResponse,
+    ) {
+        match resp {
+            MediaResponse::MediaList(file_list) => {
+                for counter in &mut self.media_request_left.values_mut() {
+                    *counter = counter.saturating_sub(1);
+                }
+
+                for filename in file_list {
+                    self.media_owner.insert(filename.clone(), Some(server_id));
+                    self.media_request_left.insert(filename.clone(), 0);
+                    if self.stored_files.contains_key(&filename) {
+                        self.create_request(RequestType::Media(filename, server_id));
+                    }
+                }
+            }
+            MediaResponse::Media(file) => {
+                // put the media together with its text file and, if no more media are needed, send to scl
+                let RequestType::Media(media_filename, _) = request_type else {
+                    println!("Response is not coherent with request, dropping request");
+                    return;
+                };
+
+                self.stored_files
+                    .entry(media_filename.clone())
+                    .and_modify(|content| *content = file);
+            }
+        }
+    }
+
     fn complete_request(&mut self, mut req: WebBrowserRequest) {
+        // ! maybe add a check for each subfunction to check if the reqesut and response types are coeherent
         println!(
             "Client {}, completing req (id: {:?}, {:?}, to: {:?})",
             self.id, req.request_id, req.request_type, req.server_id
         );
         req.incoming_messages
             .sort_by(|f1, f2| f1.fragment_index.cmp(&f2.fragment_index));
-        let content =
-            web_messages::ResponseMessage::defragment(&req.incoming_messages, req.compression);
 
-        if content.is_err() {
+        if let Ok(response_msg) =
+            web_messages::ResponseMessage::defragment(&req.incoming_messages, req.compression)
+        {
+            match response_msg.content {
+                Response::Generic(resp) => {
+                    self.complete_request_with_generic_response(
+                        req.server_id,
+                        req.request_type,
+                        resp,
+                    );
+                }
+                Response::Text(resp) => {
+                    self.complete_request_with_text_response(req.server_id, req.request_type, resp);
+                }
+                Response::Media(resp) => {
+                    self.complete_request_with_media_response(
+                        req.server_id,
+                        req.request_type,
+                        resp,
+                    );
+                }
+            }
+        } else {
             println!("client {} - Cannot deserialize response, dropping", self.id);
-            return;
-        }
-
-        match content.unwrap().content {
-            Response::Generic(resp) => {
-                match resp {
-                    GenericResponse::Type(server_type) => {
-                        self.nodes_type
-                            .entry(req.server_id)
-                            .and_modify(|t| *t = server_type.into());
-
-                        // if I discovered all the server type
-                        if !self
-                            .nodes_type
-                            .iter()
-                            .any(|(_, t)| matches!(t, GraphNodeType::Server))
-                        {
-                            let mut list = HashMap::new();
-                            for (id, t) in &self.nodes_type {
-                                match t {
-                                    GraphNodeType::Chat => {
-                                        list.insert(*id, ServerType::ChatServer);
-                                    }
-                                    GraphNodeType::Media => {
-                                        list.insert(*id, ServerType::MediaServer);
-                                    }
-                                    GraphNodeType::Text => {
-                                        list.insert(*id, ServerType::FileServer);
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            self.internal_send_to_controller(ClientEvent::ServersTypes(list));
-                        }
-                    }
-                    GenericResponse::InvalidRequest => {
-                        self.internal_send_to_controller(ClientEvent::UnsupportedRequest);
-                    }
-                    GenericResponse::NotFound => {
-                        // ! add apposite clientevent
-                        self.internal_send_to_controller(ClientEvent::UnsupportedRequest);
-                    }
-                }
-            }
-            Response::Text(resp) => {
-                match resp {
-                    TextResponse::TextList(vec) => {
-                        println!("sending message to scl {{{:?}}}", vec);
-                        let _ = self
-                            .controller_send
-                            .send(ClientEvent::ListOfFiles(vec, req.server_id));
-                    }
-                    TextResponse::Text(file) => {
-                        let file_str = String::from_utf8(file.clone()).unwrap();
-
-                        let needed_media = self.get_media_inside_text_file(&file_str);
-
-                        if !needed_media.is_empty() {
-                            println!("client {} - I need {:?} for this file",self.id, needed_media);
-                            let text_filename = match req.request_type {
-                                RequestType::Text(filename, _) => filename,
-                                _ => {
-                                    println!(
-                                        "Response is not coherent with request, dropping request"
-                                    );
-                                    return;
-                                }
-                            };
-
-                            // store the file while waiting for media
-                            self.stored_files.insert(text_filename.clone(), file);
-
-                            // store media and text files links
-                            self.text_media_map
-                                .insert((req.server_id, text_filename.clone()), needed_media.clone());
-
-
-                            let mut is_required_media_list_request = false;
-                            // store every media in stored_files as (filename, empty Vec)
-                            needed_media.iter().for_each(|media_filename| {
-
-                                // ! refactor
-
-                                if self.media_owner.get(media_filename).is_none_or(|s| s.is_none()){
-                                    self.stored_files.insert(media_filename.clone(), Vec::new());
-                                    self.media_owner.insert(media_filename.clone(), None);
-                                    self.media_request_left.insert(media_filename.clone(), self.nodes_type.iter().filter(|(_, t)| **t == GraphNodeType::Media).count() as u8);
-                                    is_required_media_list_request = true;
-                                }
-                                else {
-                                    self.create_request(RequestType::Media(media_filename.clone(), self.media_owner.get(media_filename).unwrap().unwrap()));
-                                }
-                            });
-
-                            if is_required_media_list_request{
-                                // create media list request
-                                self.nodes_type
-                                    .iter()
-                                    .filter(|(_, t)| **t == GraphNodeType::Media)
-                                    .map(|(id, _)| *id)
-                                    .collect::<Vec<NodeId>>()
-                                    .iter()
-                                    .for_each(|id| {
-                                        self.create_request(RequestType::MediaList(*id))
-                                    });
-                            }
-
-                        } else {
-                            // TODO maybe send to scl a vec<string> if media are not embedded
-                            let _ = self
-                                .controller_send
-                                .send(ClientEvent::FileFromClient(vec![file], req.server_id));
-                        }
-                    }
-                }
-            }
-            Response::Media(resp) => {
-                match resp {
-                    MediaResponse::MediaList(file_list) => {
-                        for (_, c) in &mut self.media_request_left{
-                            *c = c.saturating_sub(1);
-                        }
-
-                        for filename in file_list {
-                            self.media_owner.insert(filename.clone(), Some(req.server_id));
-                            self.media_request_left.insert(filename.clone(), 0);
-                            if self.stored_files.contains_key(&filename) {
-                                self.create_request(RequestType::Media(filename, req.server_id));
-                            }
-                    
-                        }
-                    }
-                    MediaResponse::Media(file) => {
-                        // put the media together with its text file and, if no more media are needed, send to scl
-                        let media_filename = match req.request_type {
-                            RequestType::Media(filename, _) => filename,
-                            _ => {
-                                println!("Response is not coherent with request, dropping request");
-                                return;
-                            }
-                        };
-
-                        self.stored_files
-                            .entry(media_filename.clone())
-                            .and_modify(|content| *content = file);
-                    }
-                }
-            }
         }
     }
 
@@ -945,7 +976,7 @@ impl WebBrowser {
             }
 
             ClientCommand::RequestFile(filename, server_id) => {
-                self.create_request(RequestType::Text(filename, server_id))
+                self.create_request(RequestType::Text(filename, server_id));
             }
 
             ClientCommand::Shortcut(packet) => self.handle_packet(packet),
@@ -971,7 +1002,7 @@ impl WebBrowser {
         });
 
         for channel in self.packet_send.values() {
-            self.send_packet(p.clone(), channel);
+            self.send_packet(&p, channel);
         }
 
         self.sequential_flood_id += 1;
@@ -1005,7 +1036,7 @@ impl WebBrowser {
                 .insert(self.packet_id_counter.clone(), f.clone());
 
             if let (packet, Some(channel)) = self.prepare_packet_routing(p, server_id) {
-                self.send_packet(packet, channel);
+                self.send_packet(&packet, channel);
             } else {
                 self.waiting_for_flood
                     .push_back((self.packet_id_counter.clone(), f));
@@ -1069,7 +1100,7 @@ impl WebBrowser {
 
             RequestType::Media(filename, server_id) => {
                 compression = Compression::None;
-                if !self.is_correct_server_type(*server_id, GraphNodeType::Media) {
+                if !self.is_correct_server_type(*server_id, &GraphNodeType::Media) {
                     self.internal_send_to_controller(ClientEvent::UnsupportedRequest);
                     return;
                 }
@@ -1084,7 +1115,7 @@ impl WebBrowser {
 
             RequestType::Text(filename, server_id) => {
                 compression = Compression::LZW;
-                if !self.is_correct_server_type(*server_id, GraphNodeType::Text) {
+                if !self.is_correct_server_type(*server_id, &GraphNodeType::Text) {
                     println!(
                         "client {} - cannot ask for file because it is not a text file",
                         self.id

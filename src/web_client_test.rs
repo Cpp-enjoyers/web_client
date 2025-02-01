@@ -42,6 +42,7 @@ mod web_client_tests {
     use std::{hash::BuildHasher, thread, time::Duration, vec};
 
     use ap2024_unitn_cppenjoyers_drone::CppEnjoyersDrone;
+    use common::web_messages::TextRequest;
     use common::Client;
     use crossbeam_channel::unbounded;
     use petgraph::prelude::GraphMap;
@@ -1408,8 +1409,14 @@ mod web_client_tests {
                 .unwrap(),
             &vec!["a/b/c/media.jpg".to_string()]
         );
-        assert_eq!(client.media_owner, HashMap::from([("a/b/c/media.jpg".to_string(), None)]));
-        assert_eq!(client.media_request_left, HashMap::from([("a/b/c/media.jpg".to_string(), 1)]));
+        assert_eq!(
+            client.media_owner,
+            HashMap::from([("a/b/c/media.jpg".to_string(), None)])
+        );
+        assert_eq!(
+            client.media_request_left,
+            HashMap::from([("a/b/c/media.jpg".to_string(), 1)])
+        );
 
         // media file list request
         assert_eq!(
@@ -1490,7 +1497,7 @@ mod web_client_tests {
 
         let req = client.pending_requests.pop().unwrap();
         client.complete_request(req);
-        client.send_text_and_media_back((21, "file1.html".to_string()));
+        client.send_text_and_media_back(&(21, "file1.html".to_string()));
 
         // remove packetsetn event from queue
         c_event_recv.recv().unwrap();
@@ -1508,11 +1515,16 @@ mod web_client_tests {
             )
         );
 
-        assert_eq!(client.media_owner, HashMap::from([("a.mp3".to_string(), Some(21))]));
-        assert_eq!(client.media_request_left, HashMap::from([("a.mp3".to_string(), 0)]));
+        assert_eq!(
+            client.media_owner,
+            HashMap::from([("a.mp3".to_string(), Some(21))])
+        );
+        assert_eq!(
+            client.media_request_left,
+            HashMap::from([("a.mp3".to_string(), 0)])
+        );
         assert!(client.pending_requests.is_empty());
         assert!(client.stored_files.is_empty());
-
     }
 
     #[test]
@@ -1530,16 +1542,17 @@ mod web_client_tests {
         );
 
         assert_eq!(
-            client.get_media_inside_text_file(&"suhbefuiwfbwob".to_string()),
+            WebBrowser::get_media_inside_text_file(&"suhbefuiwfbwob".to_string()),
             Vec::<String>::new()
         );
         assert_eq!(
-            client
-                .get_media_inside_text_file(&"-----------<img src=\"youtube.com\"\\>".to_string()),
+            WebBrowser::get_media_inside_text_file(
+                &"-----------<img src=\"youtube.com\"\\>".to_string()
+            ),
             vec!["youtube.com".to_string()]
         );
         assert_eq!(
-            client.get_media_inside_text_file(
+            WebBrowser::get_media_inside_text_file(
                 &"-----------<img src=\"/usr/tmp/folder/subfolder/pic.jpg\"\\>".to_string()
             ),
             vec!["/usr/tmp/folder/subfolder/pic.jpg".to_string()]
