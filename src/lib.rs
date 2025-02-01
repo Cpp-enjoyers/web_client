@@ -223,8 +223,8 @@ pub struct WebBrowser {
     topology_graph: DiGraphMap<NodeId, u64>,
     nodes_type: HashMap<NodeId, GraphNodeType>,
     waiting_for_flood: VecDeque<(PacketId, Fragment)>, // stores the outgoing fragment for which I couldn't find a path or I received a NACK back instead of ACK
-    text_media_map: HashMap<String, Vec<String>>, // links a text filename to the media filenames that it requires
-    stored_files: HashMap<String, Vec<u8>>,       // filename -> file
+    text_media_map: HashMap<(NodeId, String), Vec<String>>, // links a text filename and the nodeId that provided it to the media filenames that it requires
+    stored_files: HashMap<String, Vec<u8>>, // filename -> file
 }
 
 impl Flooder for WebBrowser {
@@ -378,17 +378,17 @@ impl Client for WebBrowser {
 }
 
 impl WebBrowser {
-    fn send_text_and_media_back(&mut self, key: String) {
+    fn send_text_and_media_back(&mut self, key: (NodeId, String)) {
         if let Some(media_list) = self.text_media_map.remove(&key) {
             let mut file_list: Vec<Vec<u8>> = vec![];
             // ! unwrap should be safe at this point
-            file_list.push(self.stored_files.remove(&key).unwrap());
+            file_list.push(self.stored_files.remove(&key.1).unwrap());
             for media in media_list {
                 file_list.push(self.stored_files.remove(&media).unwrap());
             }
             let _ = self.controller_send
             // ! self.id should be server_id that requested the text file
-                .send(ClientEvent::FileFromClient(file_list, self.id));
+                .send(ClientEvent::FileFromClient(file_list, key.0));
         } else {
             println!("ddd");
         }
@@ -811,24 +811,14 @@ impl WebBrowser {
     fn get_media_inside_text_file(&self, file_str: &str) -> Vec<String> {
         let document = scraper::Html::parse_document(file_str);
         let mut ret = vec![];
-        if let Ok(selector) = scraper::Selector::parse(r#"img"#) {
+        if let Ok(selector) = scraper::Selector::parse("img") {
             for path in document.select(&selector) {
                 if let Some(path) = path.value().attr("src") {
-                    let filename = self.get_filename_from_path(path);
-                    if !filename.is_empty() {
-                        ret.push(filename);
-                    }
+                    ret.push(path.to_string());
                 }
             }
         }
         ret
-    }
-
-    fn get_filename_from_path(&self, path: &str) -> String {
-        if let Some(filename) = path.split("/").collect::<Vec<&str>>().last() {
-            return filename.to_string();
-        }
-        String::new()
     }
 
     fn complete_request(&mut self, mut req: WebBrowserRequest) {
@@ -921,7 +911,7 @@ impl WebBrowser {
 
                             // store media and text files links
                             self.text_media_map
-                                .insert(text_filename.clone(), needed_media);
+                                .insert((req.server_id, text_filename.clone()), needed_media);
 
                             // create media list request
                             self.nodes_type
@@ -947,7 +937,6 @@ impl WebBrowser {
                     MediaResponse::MediaList(file_list) => {
                         // check if medialist constains one of the media I need and ask for it
                         for filename in file_list {
-                            let filename = self.get_filename_from_path(&filename);
                             if self.stored_files.contains_key(&filename) {
                                 self.create_request(RequestType::Media(
                                     filename,
@@ -1075,12 +1064,13 @@ impl WebBrowser {
     }
 
     fn create_request(&mut self, request_type: RequestType) {
-        let compression: Compression = Compression::None; // TODO has to be chosen by scl or randomically
+        let compression: Compression; // TODO has to be chosen by scl or randomically
 
         match &request_type {
             RequestType::TextList(server_id) => {
+                compression = Compression::None;
                 let frags =
-                    web_messages::RequestMessage::new_text_list_request(self.id, Compression::None)
+                    web_messages::RequestMessage::new_text_list_request(self.id, compression.clone())
                         .fragment()
                         .expect("Error during fragmentation. This can't happen. If it happens there is a bug somwhere");
 
@@ -1088,8 +1078,9 @@ impl WebBrowser {
             }
 
             RequestType::MediaList(server_id) => {
+                compression = Compression::None;
                 let frags =
-                    web_messages::RequestMessage::new_media_list_request(self.id, Compression::None)
+                    web_messages::RequestMessage::new_media_list_request(self.id, compression.clone())
                         .fragment()
                         .expect("Error during fragmentation. This can't happen. If it happens there is a bug somwhere");
 
@@ -1097,6 +1088,7 @@ impl WebBrowser {
             }
 
             RequestType::ServersType => {
+                compression = Compression::None;
                 let frags = RequestMessage::new_type_request(self.id, compression.clone())
                 .fragment()
                 .expect("Error during fragmentation. This can't happen. If it happens there is a bug somwhere");
@@ -1119,6 +1111,7 @@ impl WebBrowser {
             }
 
             RequestType::Media(filename, server_id) => {
+                compression = Compression::None;
                 if !self.is_correct_server_type(*server_id, GraphNodeType::Media) {
                     let _ = self.controller_send.send(ClientEvent::UnsupportedRequest);
                     return;
@@ -1133,6 +1126,7 @@ impl WebBrowser {
             }
 
             RequestType::Text(filename, server_id) => {
+                compression = Compression::LZW;
                 if !self.is_correct_server_type(*server_id, GraphNodeType::Text) {
                     println!(
                         "client {} - cannot ask for file because it is not a text file",
