@@ -1346,17 +1346,13 @@ mod web_client_tests {
             request_type: RequestType::Text("public/file1.html".to_string(), 21),
             response_is_complete: true,
         };
-
-        client.complete_request(req);
+        client.pending_requests.push(req);
+        client.try_complete_request();
 
         // remove packetsetn event from queue
         assert_eq!(
             c_event_recv.recv().unwrap(),
-            ClientEvent::FileFromClient(
-                vec![
-                    "<html><h1>ciao</h1></html>".as_bytes().to_vec()],
-                21
-            )
+            ClientEvent::FileFromClient(vec!["<html><h1>ciao</h1></html>".as_bytes().to_vec()], 21)
         );
     }
 
@@ -1397,7 +1393,8 @@ mod web_client_tests {
             response_is_complete: true,
         };
 
-        client.complete_request(req);
+        client.pending_requests.push(req);
+        client.try_complete_request();
 
         assert_eq!(
             client.stored_files.get("file1.html").unwrap(),
@@ -1405,9 +1402,14 @@ mod web_client_tests {
         );
         assert_eq!(client.stored_files.get("a/b/c/media.jpg").unwrap(), &vec![]);
         assert_eq!(
-            client.text_media_map.get(&(21, "file1.html".to_string())).unwrap(),
+            client
+                .text_media_map
+                .get(&(21, "file1.html".to_string()))
+                .unwrap(),
             &vec!["a/b/c/media.jpg".to_string()]
         );
+        assert_eq!(client.media_owner, HashMap::from([("a/b/c/media.jpg".to_string(), None)]));
+        assert_eq!(client.media_request_left, HashMap::from([("a/b/c/media.jpg".to_string(), 1)]));
 
         // media file list request
         assert_eq!(
@@ -1457,12 +1459,16 @@ mod web_client_tests {
             Packet::new_fragment(
                 SourceRoutingHeader::with_first_hop(vec![1, 21]),
                 2,
-                RequestMessage::new_media_request(1, Compression::None, "a/b/c/media.jpg".to_string())
-                    .fragment()
-                    .unwrap()
-                    .get(0)
-                    .unwrap()
-                    .clone()
+                RequestMessage::new_media_request(
+                    1,
+                    Compression::None,
+                    "a/b/c/media.jpg".to_string()
+                )
+                .fragment()
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .clone()
             )
         );
         // ack
@@ -1501,6 +1507,12 @@ mod web_client_tests {
                 21
             )
         );
+
+        assert_eq!(client.media_owner, HashMap::from([("a.mp3".to_string(), Some(21))]));
+        assert_eq!(client.media_request_left, HashMap::from([("a.mp3".to_string(), 0)]));
+        assert!(client.pending_requests.is_empty());
+        assert!(client.stored_files.is_empty());
+
     }
 
     #[test]
@@ -1533,7 +1545,6 @@ mod web_client_tests {
             vec!["/usr/tmp/folder/subfolder/pic.jpg".to_string()]
         );
     }
-
 }
 #[cfg(test)]
 mod fragmentation_tests {
