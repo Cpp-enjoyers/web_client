@@ -42,8 +42,11 @@ mod web_client_tests {
     use std::{hash::BuildHasher, thread, time::Duration, vec};
 
     use ap2024_unitn_cppenjoyers_drone::CppEnjoyersDrone;
-    use common::web_messages::TextRequest;
     use common::Client;
+    use common::{
+        slc_commands::{WebClientCommand, WebClientEvent},
+        web_messages::TextRequest,
+    };
     use crossbeam_channel::unbounded;
     use petgraph::prelude::GraphMap;
     use wg_2024::drone::Drone;
@@ -355,7 +358,7 @@ mod web_client_tests {
 
         sleep(MS500);
 
-        client.handle_command(ClientCommand::AddSender(11, d_send.clone()));
+        client.handle_command(WebClientCommand::AddSender(11, d_send.clone()));
 
         assert_eq!(
             d_recv.recv().unwrap(),
@@ -437,7 +440,7 @@ mod web_client_tests {
 
         sleep(MS500);
 
-        let _ = c_command_send.send(ClientCommand::AskListOfFiles(21));
+        let _ = c_command_send.send(WebClientCommand::AskListOfFiles(21));
 
         // receive request
         //println!("{:?}", req);
@@ -506,7 +509,7 @@ mod web_client_tests {
         let resp = c_event_recv.recv().unwrap();
         println!("--{:?}", resp);
 
-        if let ClientEvent::ListOfFiles(files, id) = resp {
+        if let WebClientEvent::ListOfFiles(files, id) = resp {
             assert_eq!(files, vec!["file1".to_string(), "file2".to_string()]);
             assert_eq!(id, 21);
         } else {
@@ -584,7 +587,7 @@ mod web_client_tests {
 
         sleep(MS500);
 
-        let _ = c_command_send.send(ClientCommand::AskListOfFiles(21));
+        let _ = c_command_send.send(WebClientCommand::AskListOfFiles(21));
 
         // receive request
         //println!("{:?}", req);
@@ -687,7 +690,7 @@ mod web_client_tests {
         let resp = c_event_recv.recv().unwrap();
         println!("--{:?}", resp);
 
-        if let ClientEvent::ListOfFiles(files, id) = resp {
+        if let WebClientEvent::ListOfFiles(files, id) = resp {
             assert_eq!(files, vec!["file1".to_string(), "file2".to_string()]);
             assert_eq!(id, 21);
         } else {
@@ -765,7 +768,7 @@ mod web_client_tests {
 
         sleep(MS500);
 
-        let _ = c_command_send.send(ClientCommand::AskListOfFiles(21));
+        let _ = c_command_send.send(WebClientCommand::AskListOfFiles(21));
 
         // receive request
         //println!("{:?}", req);
@@ -974,7 +977,7 @@ mod web_client_tests {
         let resp = c_event_recv.recv().unwrap();
         println!("--{:?}", resp);
 
-        if let ClientEvent::ListOfFiles(files, id) = resp {
+        if let WebClientEvent::ListOfFiles(files, id) = resp {
             assert_eq!(files, vec!["file1".to_string(), "file2".to_string()]);
             assert_eq!(id, 21);
         } else {
@@ -1052,7 +1055,7 @@ mod web_client_tests {
 
         sleep(MS500);
 
-        let _ = c_command_send.send(ClientCommand::AskServersTypes);
+        let _ = c_command_send.send(WebClientCommand::AskServersTypes);
 
         // receive request
         //println!("{:?}", req);
@@ -1122,7 +1125,7 @@ mod web_client_tests {
         let resp = c_event_recv.recv().unwrap();
         //println!("--{:?}", resp);
 
-        if let ClientEvent::ServersTypes(map) = resp {
+        if let WebClientEvent::ServersTypes(map) = resp {
             assert_eq!(map, HashMap::from([(21, ServerType::FileServer)]));
         } else {
             assert!(false)
@@ -1198,7 +1201,7 @@ mod web_client_tests {
 
         sleep(MS500);
 
-        let _ = c_command_send.send(ClientCommand::AskServersTypes);
+        let _ = c_command_send.send(WebClientCommand::AskServersTypes);
 
         // send fake nack with problematic node id = 11
         let req_to_ignore = s_recv.recv().unwrap();
@@ -1304,7 +1307,7 @@ mod web_client_tests {
         let resp = c_event_recv.recv().unwrap();
         //println!("--{:?}", resp);
 
-        if let ClientEvent::ServersTypes(map) = resp {
+        if let WebClientEvent::ServersTypes(map) = resp {
             assert_eq!(map, HashMap::from([(21, ServerType::FileServer)]));
         } else {
             assert!(false)
@@ -1353,7 +1356,10 @@ mod web_client_tests {
         // remove packetsetn event from queue
         assert_eq!(
             c_event_recv.recv().unwrap(),
-            ClientEvent::FileFromClient(vec!["<html><h1>ciao</h1></html>".as_bytes().to_vec()], 21)
+            WebClientEvent::FileFromClient(
+                TextMediaResponse::new(("file1.html".to_string(), "<html><h1>ciao</h1></html>".as_bytes().to_vec()), vec![]),
+                21
+            )
         );
     }
 
@@ -1541,7 +1547,217 @@ mod web_client_tests {
         c_event_recv.recv().unwrap();
         assert_eq!(
             c_event_recv.recv().unwrap(),
+            WebClientEvent::FileFromClient(
+                TextMediaResponse::new(
+                    (
+                        "file1.html".to_string(),
+                        "<html><img src=\"a/b/c/media.jpg\"/>".as_bytes().to_vec()
+                    ),
+                    vec![("media.jpg".to_string(), vec![1, 2, 3, 4, 5])]
+                ),
+                21
+            )
+        );
+
+        assert!(client.media_owner.is_empty());
+        assert!(client.media_request_left.is_empty());
+        assert!(client.pending_requests.is_empty());
+        assert!(client.stored_files.is_empty());
+    }
+
+/*
+    #[test]
+    pub fn file_request_three_media_third_unavailable() {
+        todo!();
+        // Client 1 channels
+        let (_c_send, c_recv) = unbounded();
+        // SC - needed to not make the drone crash
+        let (c_event_send, c_event_recv) = unbounded();
+        let (_c_command_send, c_command_recv) = unbounded();
+        // Server
+        let (s_send, s_recv) = unbounded();
+
+        let mut client = WebBrowser::new(
+            1,
+            c_event_send.clone(),
+            c_command_recv.clone(),
+            c_recv.clone(),
+            HashMap::from([(21, s_send.clone())]),
+        );
+        client.topology_graph = GraphMap::from_edges([(1, 21, 1), (21, 1, 1)]);
+        client.nodes_type = HashMap::from([(21, GraphNodeType::Media)]);
+        client.packet_id_counter = PacketId::from_u64(1);
+
+        let html = "<html><img src=\"a/b/c/media.jpg\"/>fieub<img src=\"a/media2.jpg\"/>fieub<img src=\"c/media3.jpg\"/>fieub";
+        let html_response = ResponseMessage::new_text_response(
+            21,
+            Compression::LZW,
+            html.as_bytes().to_vec(),
+        );
+
+        let ret = simulate_server_compression(html_response.clone());
+        let req = WebBrowserRequest {
+            request_id: 0,
+            server_id: 21,
+            waiting_for_ack: HashMap::new(),
+            incoming_messages: ret,
+            compression: Compression::LZW,
+            request_type: RequestType::Text("file1.html".to_string(), 21),
+            response_is_complete: true,
+        };
+
+        client.pending_requests.push(req);
+        client.try_complete_request();
+
+        assert_eq!(
+            client.stored_files.get("file1.html").unwrap(),
+            &html.as_bytes().to_vec(),
+
+        );
+        assert!(client.stored_files.get("a/b/c/media.jpg").is_none());
+        assert!(client.stored_files.get("a/media2.jpg").is_none());
+        assert!(client.stored_files.get("c/media3.jpg").is_none());
+        assert_eq!(
+            client
+                .text_media_map
+                .get(&(21, "file1.html".to_string()))
+                .unwrap(),
+            &vec!["a/b/c/media.jpg".to_string(), "a/media2.jpg".to_string(), "c/media3.jpg".to_string()]
+        );
+        assert_eq!(
+            client.media_owner,
+            HashMap::from([("a/b/c/media.jpg".to_string(), None), ("a/media2.jpg".to_string(), None), ("c/media3.jpg".to_string(), None)])
+        );
+        assert_eq!(
+            client.media_request_left,
+            HashMap::from([("a/b/c/media.jpg".to_string(), 1), ("a/media2.jpg".to_string(), 1), ("c/media3.jpg".to_string(), 1)])
+        );
+
+        // media file list request
+        assert_eq!(
+            s_recv.recv().unwrap(),
+            Packet::new_fragment(
+                SourceRoutingHeader::with_first_hop(vec![1, 21]),
+                1,
+                RequestMessage::new_media_list_request(1, Compression::None)
+                    .fragment()
+                    .unwrap()
+                    .get(0)
+                    .unwrap()
+                    .clone()
+            )
+        );
+        // ack
+        client.pending_requests.get_mut(0).unwrap().waiting_for_ack = HashMap::new();
+
+        // media file list response
+        let mut id = PacketId::from_u64(1);
+        id.increment_packet_id();
+        client.handle_packet(Packet::new_fragment(
+            SourceRoutingHeader::with_first_hop(vec![21, 1]),
+            id.get_session_id(),
+            ResponseMessage::new_media_list_response(
+                21,
+                Compression::None,
+                vec!["a.mp3".to_string(), "a/b/c/media.jpg".to_string()],
+            )
+            .fragment()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .clone(),
+        ));
+
+        assert_eq!(
+            client
+                .media_owner
+                .get(&"a/b/c/media.jpg".to_string())
+                .unwrap(),
+            &None
+        );
+        assert!(client
+            .stored_files
+            .get(&"a/b/c/media.jpg".to_string())
+            .is_none());
+        assert_eq!(
+            client
+                .media_request_left
+                .get(&"a/b/c/media.jpg".to_string())
+                .unwrap(),
+            &1
+        );
+
+        client.try_complete_request();
+
+        assert_eq!(
+            client
+                .media_owner
+                .get(&"a/b/c/media.jpg".to_string())
+                .unwrap(),
+            &Some(21)
+        );
+        assert!(client
+            .stored_files
+            .get(&"a/b/c/media.jpg".to_string())
+            .is_none());
+        assert_eq!(
+            client
+                .media_request_left
+                .get(&"a/b/c/media.jpg".to_string())
+                .unwrap(),
+            &0
+        );
+
+        assert_eq!(
+            client.pending_requests.get(0).unwrap().request_type,
+            RequestType::Media("a/b/c/media.jpg".to_string(), 21)
+        );
+        s_recv.recv().unwrap();
+        assert_eq!(
+            s_recv.recv().unwrap(),
+            Packet::new_fragment(
+                SourceRoutingHeader::with_first_hop(vec![1, 21]),
+                2,
+                RequestMessage::new_media_request(
+                    1,
+                    Compression::None,
+                    "a/b/c/media.jpg".to_string()
+                )
+                .fragment()
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .clone()
+            )
+        );
+        // ack
+        client.pending_requests.get_mut(0).unwrap().waiting_for_ack = HashMap::new();
+
+        // media file response
+        let mut id = PacketId::from_u64(2);
+        id.increment_packet_id();
+        client.handle_packet(Packet::new_fragment(
+            SourceRoutingHeader::with_first_hop(vec![21, 1]),
+            id.get_session_id(),
+            ResponseMessage::new_media_response(21, Compression::None, vec![1, 2, 3, 4, 5])
+                .fragment()
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .clone(),
+        ));
+
+        client.try_complete_request();
+
+        // remove packetsent event from queue
+        c_event_recv.recv().unwrap();
+        c_event_recv.recv().unwrap();
+        c_event_recv.recv().unwrap();
+        c_event_recv.recv().unwrap();
+        assert_eq!(
+            c_event_recv.recv().unwrap(),
             ClientEvent::FileFromClient(
+                TextMediaResponse::new((html_file), media_files)
                 vec![
                     "<html><img src=\"a/b/c/media.jpg\"/>".as_bytes().to_vec(),
                     vec![1, 2, 3, 4, 5]
@@ -1556,6 +1772,7 @@ mod web_client_tests {
         assert!(client.stored_files.is_empty());
     }
 
+ */
     #[test]
     fn file_parsing() {
         let (_c, c_recv) = unbounded();
@@ -1588,6 +1805,7 @@ mod web_client_tests {
         );
     }
 }
+
 #[cfg(test)]
 mod fragmentation_tests {
     use common::web_messages::{Compression, RequestMessage, ResponseMessage, Serializable};
