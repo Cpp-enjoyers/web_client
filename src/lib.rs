@@ -229,7 +229,7 @@ pub struct WebBrowser {
     packet_id_counter: PacketId,
     topology_graph: DiGraphMap<NodeId, u64>,
     nodes_type: HashMap<NodeId, GraphNodeType>,
-    waiting_for_flood: VecDeque<(PacketId, Fragment)>, // stores the outgoing fragment for which I couldn't find a path or I received a NACK back instead of ACK
+    packets_to_bo_sent_again: VecDeque<(PacketId, Fragment)>, // stores the outgoing fragment for which I couldn't find a path or I received a NACK back instead of ACK
     text_media_map: HashMap<(NodeId, String), Vec<String>>, // links a text filename and the nodeId that provided it to the media filenames that it requires
     stored_files: HashMap<String, Vec<u8>>,                 // filename -> file
     //media_file_either_owner_or_counter: HashMap<String, Either<Option<NodeId>, u8>>, // for every media file store either the owner or the n. of remaining media list responses to know the owner
@@ -297,7 +297,7 @@ impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
             packet_id_counter: PacketId::new(),
             topology_graph: DiGraphMap::from_edges(initial_edges),
             nodes_type: HashMap::from([(id, GraphNodeType::Client)]),
-            waiting_for_flood: VecDeque::new(),
+            packets_to_bo_sent_again: VecDeque::new(),
             text_media_map: HashMap::new(),
             stored_files: HashMap::new(),
             media_request_left: HashMap::new(),
@@ -333,14 +333,21 @@ impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
 }
 
 impl WebBrowser {
+    // TESTED
+    fn get_filename_from_path(s: &String) -> String{
+        s.split('/').last().unwrap_or(s).to_string()
+    }
+
+    // TESTED
     fn internal_send_to_controller(&self, msg: WebClientEvent) {
         if let Err(e) = self.controller_send.send(msg) {
             println!("client {} - cannot send to scl: {e:?}", self.id);
         }
     }
 
+    // TESTED
     fn try_resend_packet(&mut self) {
-        if let Some((id, frag)) = self.waiting_for_flood.pop_front() {
+        if let Some((id, frag)) = self.packets_to_bo_sent_again.pop_front() {
             if let Some(req) = self
                 .pending_requests
                 .iter()
@@ -356,7 +363,7 @@ impl WebBrowser {
                 if let Some(channel) = channel {
                     self.send_packet(&packet, channel);
                 } else {
-                    self.waiting_for_flood
+                    self.packets_to_bo_sent_again
                         .push_back((PacketId::from_u64(packet.session_id), frag));
                 }
             } else {
@@ -410,13 +417,18 @@ impl WebBrowser {
         println!("send_text_and_media_back");
         if let Some(media_list) = self.text_media_map.remove(key) {
             // ! unwrap of the text file must work
-            let html_file = (key.1.split('/').last().unwrap_or("index.html").to_string(), self.stored_files.remove(&key.1).unwrap());
+            let html_file = (
+                Self::get_filename_from_path(&key.1),
+                self.stored_files.remove(&key.1).unwrap(),
+            );
             let mut media_files = vec![];
 
             for media_full_name in media_list {
                 media_files.push((
-                    media_full_name.split('/').last().unwrap_or(&media_full_name).to_string(),
-                    self.stored_files.remove(&media_full_name).unwrap_or_default(),
+                    Self::get_filename_from_path(&media_full_name),
+                    self.stored_files
+                        .remove(&media_full_name)
+                        .unwrap_or_default(),
                 ));
                 self.media_owner.remove(&media_full_name);
                 self.media_request_left.remove(&media_full_name);
@@ -670,7 +682,7 @@ impl WebBrowser {
                         if let (packet, Some(channel)) = self.prepare_packet_routing(p, dest) {
                             self.send_packet(&packet, channel);
                         } else {
-                            self.waiting_for_flood.push_back((
+                            self.packets_to_bo_sent_again.push_back((
                                 PacketId::from_u64(packet.session_id),
                                 fragment.clone(),
                             ));
@@ -693,7 +705,7 @@ impl WebBrowser {
                         if let (packet, Some(channel)) = self.prepare_packet_routing(p, dest) {
                             self.send_packet(&packet, channel);
                         } else {
-                            self.waiting_for_flood.push_back((
+                            self.packets_to_bo_sent_again.push_back((
                                 PacketId::from_u64(packet.session_id),
                                 fragment.clone(),
                             ));
@@ -826,7 +838,7 @@ impl WebBrowser {
                 self.internal_send_to_controller(WebClientEvent::ListOfFiles(vec, server_id));
             }
             TextResponse::Text(file) => {
-                let RequestType::Text(text_filename, _) = request_type else {
+                let RequestType::Text(text_path, _) = request_type else {
                     println!("Response is not coherent with request, dropping request");
                     return;
                 };
@@ -836,9 +848,8 @@ impl WebBrowser {
                 let needed_media = Self::get_media_inside_text_file(&file_str);
 
                 if needed_media.is_empty() {
-                    let filename_without_path = text_filename.split('/').last().unwrap_or("index.html").to_string();
                     self.internal_send_to_controller(WebClientEvent::FileFromClient(
-                        TextMediaResponse::new((filename_without_path, file), Vec::new()),
+                        TextMediaResponse::new((Self::get_filename_from_path(&text_path), file), Vec::new()),
                         server_id,
                     ));
                 } else {
@@ -848,11 +859,11 @@ impl WebBrowser {
                     );
 
                     // store the file while waiting for media
-                    self.stored_files.insert(text_filename.clone(), file);
+                    self.stored_files.insert(text_path.clone(), file);
 
                     // store media and text files links
                     self.text_media_map
-                        .insert((server_id, text_filename.clone()), needed_media.clone());
+                        .insert((server_id, text_path.clone()), needed_media.clone());
 
                     let mut is_required_media_list_request = false;
                     // store every media in stored_files as (filename, empty Vec)
@@ -864,18 +875,18 @@ impl WebBrowser {
                     // else, if remaining list counter is set, do nothing(it's already been asked)
                     // else, set counter and ask media lists
 
-                    for media_filename in needed_media {
+                    for media_path in needed_media {
                         // ! refactor
 
                         if self
                             .media_owner
-                            .get(&media_filename)
+                            .get(&media_path)
                             .is_none_or(std::option::Option::is_none)
                         {
                             //self.stored_files.insert(media_filename.clone(), Vec::new());
-                            self.media_owner.insert(media_filename.clone(), None);
+                            self.media_owner.insert(media_path.clone(), None);
                             self.media_request_left.insert(
-                                media_filename.clone(),
+                                media_path.clone(),
                                 self.nodes_type
                                     .iter()
                                     .filter(|(_, t)| **t == GraphNodeType::Media)
@@ -892,8 +903,8 @@ impl WebBrowser {
                             is_required_media_list_request = true;
                         } else {
                             self.create_request(RequestType::Media(
-                                media_filename.clone(),
-                                self.media_owner.get(&media_filename).unwrap().unwrap(),
+                                media_path.clone(),
+                                self.media_owner.get(&media_path).unwrap().unwrap(),
                             ));
                         }
 
@@ -935,23 +946,23 @@ impl WebBrowser {
                     *counter = counter.saturating_sub(1);
                 }
 
-                for filename in file_list {
-                    if self.text_media_map.values().any(|v| v.contains(&filename)) {
-                        self.media_owner.insert(filename.clone(), Some(server_id));
-                        self.media_request_left.insert(filename.clone(), 0);
-                        self.create_request(RequestType::Media(filename, server_id));
+                for media_path in file_list {
+                    if self.text_media_map.values().any(|v| v.contains(&media_path)) {
+                        self.media_owner.insert(media_path.clone(), Some(server_id));
+                        self.media_request_left.insert(media_path.clone(), 0);
+                        self.create_request(RequestType::Media(media_path, server_id));
                     }
                 }
             }
             MediaResponse::Media(file) => {
-                let RequestType::Media(media_filename, _) = request_type else {
+                let RequestType::Media(media_path, _) = request_type else {
                     println!("Response is not coherent with request, dropping request");
                     return;
                 };
                 // todo
                 // store in the cache
 
-                self.stored_files.insert(media_filename.clone(), file);
+                self.stored_files.insert(media_path.clone(), file);
             }
         }
     }
@@ -1078,7 +1089,7 @@ impl WebBrowser {
             if let (packet, Some(channel)) = self.prepare_packet_routing(p, server_id) {
                 self.send_packet(&packet, channel);
             } else {
-                self.waiting_for_flood
+                self.packets_to_bo_sent_again
                     .push_back((self.packet_id_counter.clone(), f));
                 self.start_flooding();
             }
@@ -1138,7 +1149,7 @@ impl WebBrowser {
                 }
             }
 
-            RequestType::Media(filename, server_id) => {
+            RequestType::Media(file_path, server_id) => {
                 compression = Compression::None;
                 if !self.is_correct_server_type(*server_id, &GraphNodeType::Media) {
                     self.internal_send_to_controller(WebClientEvent::UnsupportedRequest);
@@ -1146,14 +1157,14 @@ impl WebBrowser {
                 }
 
                 let frags =
-                    web_messages::RequestMessage::new_media_request(self.id, compression.clone(), filename.clone())
+                    web_messages::RequestMessage::new_media_request(self.id, compression.clone(), file_path.clone())
                         .fragment()
                         .expect("Error during fragmentation. This can't happen. If it happens there is a bug somewhere");
 
                 self.add_request(*server_id, compression, frags, request_type);
             }
 
-            RequestType::Text(filename, server_id) => {
+            RequestType::Text(file_path, server_id) => {
                 compression = Compression::LZW;
                 if !self.is_correct_server_type(*server_id, &GraphNodeType::Text) {
                     println!(
@@ -1165,7 +1176,7 @@ impl WebBrowser {
                 }
 
                 let frags =
-                    web_messages::RequestMessage::new_text_request(self.id, compression.clone(), filename.clone())
+                    web_messages::RequestMessage::new_text_request(self.id, compression.clone(), file_path.clone())
                         .fragment()
                         .expect("Error during fragmentation. This can't happen. If it happens there is a bug somwhere");
 
