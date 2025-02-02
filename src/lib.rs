@@ -484,11 +484,13 @@ impl WebBrowser {
 
                         _ => {}
                     }
+                    println!("client {} - found a path towards {}", self.id, packet.routing_header.current_hop().unwrap());
 
                     return (packet, Some(channel));
                 }
             }
         }
+        println!("client {} - CANNOT find a path towards {}", self.id, packet.routing_header.current_hop().unwrap());
 
         (packet, None)
     }
