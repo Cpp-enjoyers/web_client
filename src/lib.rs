@@ -877,6 +877,9 @@ impl WebBrowser {
                                 self.media_owner.get(&media_filename).unwrap().unwrap(),
                             ));
                         }
+
+                        println!("client {} - {:?}",self.id, self.media_owner);
+                        println!("client {} - {:?}",self.id, self.media_request_left);
                     }
 
                     if is_required_media_list_request {
@@ -888,6 +891,7 @@ impl WebBrowser {
                             .collect::<Vec<NodeId>>()
                             .iter()
                             .for_each(|id| {
+                                println!("client {} - creating media list request",self.id);
                                 self.create_request(RequestType::MediaList(*id));
                             });
                     }
