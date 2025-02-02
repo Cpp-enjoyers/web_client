@@ -410,10 +410,10 @@ impl WebBrowser {
         println!("send_text_and_media_back");
         if let Some(media_list) = self.text_media_map.remove(key) {
             let mut file_list: Vec<Vec<u8>> = vec![];
-            // ! unwrap should be safe at this point
+            // ! unwrap of the text file must work
             file_list.push(self.stored_files.remove(&key.1).unwrap());
             for media in media_list {
-                file_list.push(self.stored_files.remove(&media).unwrap());
+                file_list.push(self.stored_files.remove(&media).unwrap_or_default());
                 self.media_owner.remove(&media);
                 self.media_request_left.remove(&media);
             }
@@ -870,6 +870,10 @@ impl WebBrowser {
                                     .filter(|(_, t)| **t == GraphNodeType::Media)
                                     .count() as u8,
                             );
+                            println!("client {} - number of media client: {}",self.id, self.nodes_type
+                            .iter()
+                            .filter(|(_, t)| **t == GraphNodeType::Media)
+                            .count() as u8);
                             is_required_media_list_request = true;
                         } else {
                             self.create_request(RequestType::Media(
