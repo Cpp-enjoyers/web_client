@@ -3,6 +3,7 @@
 use common::slc_commands::{ClientCommand, ClientEvent, ServerType};
 use core::time;
 use crossbeam_channel::{select_biased, Receiver, Sender};
+use itertools::{Either, Itertools};
 use petgraph::algo::astar;
 use petgraph::prelude::DiGraphMap;
 use std::collections::{HashMap, VecDeque};
@@ -231,6 +232,7 @@ pub struct WebBrowser {
     waiting_for_flood: VecDeque<(PacketId, Fragment)>, // stores the outgoing fragment for which I couldn't find a path or I received a NACK back instead of ACK
     text_media_map: HashMap<(NodeId, String), Vec<String>>, // links a text filename and the nodeId that provided it to the media filenames that it requires
     stored_files: HashMap<String, Vec<u8>>,                 // filename -> file
+    //media_file_either_owner_or_counter: HashMap<String, Either<Option<NodeId>, u8>>, // for every media file store either the owner or the n. of remaining media list responses to know the owner
     media_owner: HashMap<String, Option<NodeId>>, // media server which owns the media, if any
     media_request_left: HashMap<String, u8>, // how many media list response I have to wait before knowing that media is unavailable
 }
@@ -374,16 +376,24 @@ impl WebBrowser {
             self.complete_request(req);
         }
 
+        // todo
+        // search for an entry that, for each of the needed media, it either is in cache or the owner is None
         if let Some(key) = self
             .text_media_map
             .iter()
             .find(|(_, list)| {
                 for f in *list {
-                    if self
+                    if (self
                         .media_owner
                         .get(f)
                         .is_some_and(std::option::Option::is_none)
                         && self.media_request_left.get(f).is_some_and(|r| *r > 0)
+                        && !self.stored_files.contains_key(f))
+                        || (!self.stored_files.contains_key(f)
+                            && self
+                                .media_owner
+                                .get(f)
+                                .is_some_and(std::option::Option::is_some))
                     {
                         return false;
                     }
@@ -397,6 +407,7 @@ impl WebBrowser {
     }
 
     fn send_text_and_media_back(&mut self, key: &(NodeId, String)) {
+        println!("send_text_and_media_back");
         if let Some(media_list) = self.text_media_map.remove(key) {
             let mut file_list: Vec<Vec<u8>> = vec![];
             // ! unwrap should be safe at this point
@@ -834,6 +845,14 @@ impl WebBrowser {
 
                     let mut is_required_media_list_request = false;
                     // store every media in stored_files as (filename, empty Vec)
+
+                    // TODO
+                    // for every media:
+                    // if present in cache do nothing
+                    // else, if I know the owner, do nothing (the file is arriving)
+                    // else, if remaining list counter is set, do nothing(it's already been asked)
+                    // else, set counter and ask media lists
+
                     for media_filename in needed_media {
                         // ! refactor
 
@@ -842,7 +861,7 @@ impl WebBrowser {
                             .get(&media_filename)
                             .is_none_or(std::option::Option::is_none)
                         {
-                            self.stored_files.insert(media_filename.clone(), Vec::new());
+                            //self.stored_files.insert(media_filename.clone(), Vec::new());
                             self.media_owner.insert(media_filename.clone(), None);
                             self.media_request_left.insert(
                                 media_filename.clone(),
@@ -885,28 +904,31 @@ impl WebBrowser {
     ) {
         match resp {
             MediaResponse::MediaList(file_list) => {
+                // TODO
+                // for every needed file, -1 to the counter
+                // for every file in the list *that is needed*, if owner not set, set it and create request
+                // else, do nothing (the file is arriving)
                 for counter in &mut self.media_request_left.values_mut() {
                     *counter = counter.saturating_sub(1);
                 }
 
                 for filename in file_list {
-                    self.media_owner.insert(filename.clone(), Some(server_id));
-                    self.media_request_left.insert(filename.clone(), 0);
-                    if self.stored_files.contains_key(&filename) {
+                    if self.text_media_map.values().any(|v| v.contains(&filename)) {
+                        self.media_owner.insert(filename.clone(), Some(server_id));
+                        self.media_request_left.insert(filename.clone(), 0);
                         self.create_request(RequestType::Media(filename, server_id));
                     }
                 }
             }
             MediaResponse::Media(file) => {
-                // put the media together with its text file and, if no more media are needed, send to scl
                 let RequestType::Media(media_filename, _) = request_type else {
                     println!("Response is not coherent with request, dropping request");
                     return;
                 };
+                // todo
+                // store in the cache
 
-                self.stored_files
-                    .entry(media_filename.clone())
-                    .and_modify(|content| *content = file);
+                self.stored_files.insert(media_filename.clone(), file);
             }
         }
     }

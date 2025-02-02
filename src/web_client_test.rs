@@ -1401,7 +1401,7 @@ mod web_client_tests {
             client.stored_files.get("file1.html").unwrap(),
             &"<html><img src=\"a/b/c/media.jpg\"/>".as_bytes().to_vec()
         );
-        assert_eq!(client.stored_files.get("a/b/c/media.jpg").unwrap(), &vec![]);
+        assert!(client.stored_files.get("a/b/c/media.jpg").is_none());
         assert_eq!(
             client
                 .text_media_map
@@ -1452,9 +1452,46 @@ mod web_client_tests {
             .unwrap()
             .clone(),
         ));
-        let req = client.pending_requests.pop().unwrap();
 
-        client.complete_request(req);
+        assert_eq!(
+            client
+                .media_owner
+                .get(&"a/b/c/media.jpg".to_string())
+                .unwrap(),
+            &None
+        );
+        assert!(client
+            .stored_files
+            .get(&"a/b/c/media.jpg".to_string())
+            .is_none());
+        assert_eq!(
+            client
+                .media_request_left
+                .get(&"a/b/c/media.jpg".to_string())
+                .unwrap(),
+            &1
+        );
+
+        client.try_complete_request();
+
+        assert_eq!(
+            client
+                .media_owner
+                .get(&"a/b/c/media.jpg".to_string())
+                .unwrap(),
+            &Some(21)
+        );
+        assert!(client
+            .stored_files
+            .get(&"a/b/c/media.jpg".to_string())
+            .is_none());
+        assert_eq!(
+            client
+                .media_request_left
+                .get(&"a/b/c/media.jpg".to_string())
+                .unwrap(),
+            &0
+        );
 
         assert_eq!(
             client.pending_requests.get(0).unwrap().request_type,
@@ -1495,11 +1532,9 @@ mod web_client_tests {
                 .clone(),
         ));
 
-        let req = client.pending_requests.pop().unwrap();
-        client.complete_request(req);
-        client.send_text_and_media_back(&(21, "file1.html".to_string()));
+        client.try_complete_request();
 
-        // remove packetsetn event from queue
+        // remove packetsent event from queue
         c_event_recv.recv().unwrap();
         c_event_recv.recv().unwrap();
         c_event_recv.recv().unwrap();
@@ -1515,14 +1550,8 @@ mod web_client_tests {
             )
         );
 
-        assert_eq!(
-            client.media_owner,
-            HashMap::from([("a.mp3".to_string(), Some(21))])
-        );
-        assert_eq!(
-            client.media_request_left,
-            HashMap::from([("a.mp3".to_string(), 0)])
-        );
+        assert!(client.media_owner.is_empty());
+        assert!(client.media_request_left.is_empty());
         assert!(client.pending_requests.is_empty());
         assert!(client.stored_files.is_empty());
     }
