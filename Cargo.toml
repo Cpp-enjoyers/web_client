@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 wg_2024 = { git = "https://github.com/WGL-2024/WGL_repo_2024.git", features = ["serialize", "debug"] }
-common = {git = "https://github.com/Cpp-enjoyers/common.git", branch = "rework"}
+common = {git = "https://github.com/Cpp-enjoyers/common.git"}
 crossbeam-channel = "0.5"
 compression = {git = "https://github.com/Cpp-enjoyers/compression_lib.git"}
 bincode = {version = "2.0.0-rc", features = ["serde"]}
