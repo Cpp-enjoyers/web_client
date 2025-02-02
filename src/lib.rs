@@ -410,12 +410,12 @@ impl WebBrowser {
         println!("send_text_and_media_back");
         if let Some(media_list) = self.text_media_map.remove(key) {
             // ! unwrap of the text file must work
-            let html_file = (key.1.clone(), self.stored_files.remove(&key.1).unwrap());
+            let html_file = (key.1.split('/').last().unwrap_or("index.html").to_string(), self.stored_files.remove(&key.1).unwrap());
             let mut media_files = vec![];
 
             for media_full_name in media_list {
                 media_files.push((
-                    media_full_name.split('/').last().unwrap_or("index.html").to_string(),
+                    media_full_name.split('/').last().unwrap_or(&media_full_name).to_string(),
                     self.stored_files.remove(&media_full_name).unwrap_or_default(),
                 ));
                 self.media_owner.remove(&media_full_name);
