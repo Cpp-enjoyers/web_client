@@ -116,6 +116,8 @@ impl Fragmentable for RequestMessage {
             }
 
             Compression::None => msg,
+
+            Compression::Huffman => todo!()
         };
 
         Self::deserialize(decompressed)
@@ -169,6 +171,8 @@ impl Fragmentable for ResponseMessage {
             }
 
             Compression::None => msg,
+
+            Compression::Huffman => todo!()
         };
 
         Self::deserialize(decompressed)
