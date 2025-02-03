@@ -39,6 +39,7 @@ fn simulate_server_compression(before: ResponseMessage) -> Vec<Fragment> {
 #[cfg(test)]
 mod web_client_tests {
     use itertools::Itertools;
+    use std::fmt::Debug;
     use std::{hash::BuildHasher, thread, time::Duration, vec};
 
     use ap2024_unitn_cppenjoyers_drone::CppEnjoyersDrone;
@@ -56,7 +57,7 @@ mod web_client_tests {
     const MS500: Duration = Duration::from_millis(500);
 
     /// compares two graphmaps
-    fn graphmap_eq<N, E, Ty, Ix>(a: &GraphMap<N, E, Ty, Ix>, b: &GraphMap<N, E, Ty, Ix>) -> bool
+    fn graphmap_eq<N: Debug, E: Debug, Ty, Ix>(a: &GraphMap<N, E, Ty, Ix>, b: &GraphMap<N, E, Ty, Ix>) -> bool
     where
         N: PartialEq + PartialOrd + std::hash::Hash + Ord + Copy,
         E: PartialEq + Copy + PartialOrd,
@@ -69,86 +70,69 @@ mod web_client_tests {
         let b_es = b.all_edges().map(|e| ((e.0, e.1, *e.2)));
         a_es.sorted_by(|a, b| a.partial_cmp(b).unwrap())
             .eq(b_es.sorted_by(|a, b| a.partial_cmp(b).unwrap()))
-        /*
-        for (a, b, c) in a_es.sorted_by(|a, b| a.partial_cmp(b).unwrap()) {
-            print!("{a}, {b}, {c} - ");
-        }
-        println!("\n---");
-        for (a, b, c) in b_es.sorted_by(|a, b| a.partial_cmp(b).unwrap()) {
-            print!("{a}, {b}, {c} - ");
-        }
-        println!("\n-----");
-        true
-         */
+
+        // for (a, b, c) in a_es.sorted_by(|a, b| a.partial_cmp(b).unwrap()) {
+        //     print!("{a:?}, {b:?}, {c:?} - ");
+        // }
+        // println!("\n---");
+        // for (a, b, c) in b_es.sorted_by(|a, b| a.partial_cmp(b).unwrap()) {
+        //     print!("{a:?}, {b:?}, {c:?} - ");
+        // }
+        // println!("\n-----");
+        // true
+    }
+
+    #[test]
+    pub fn increase_packet_sent_counter(){
+        // Client 1 channels
+        let (c_send, c_recv) = unbounded();
+        // drone 1 channels
+        let (d_send, d_recv) = unbounded();
+
+        // SC - needed to not make the drone crash
+        let (c_event_send, _) = unbounded();
+        let (_, c_command_recv) = unbounded();
+
+        let mut client = WebBrowser::new(1, c_event_send.clone(),
+        c_command_recv.clone(), c_recv.clone(), HashMap::from([(11, d_send.clone())]));
+
+        client.packets_sent_counter.insert(11, 0);
+        client.increment_edge_weight(11);
+        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &1);
+        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &1.);
+
+        client.increment_edge_weight(11);
+        client.increment_edge_weight(11);
+        client.increment_edge_weight(11);
+        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &4);
+        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &0.);
+
+        client.decrement_edge_weight(11);
+        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &4);
+        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &0.25);
+
+        client.decrement_edge_weight(11);
+        client.decrement_edge_weight(11);
+        client.decrement_edge_weight(11);
+        client.decrement_edge_weight(11);
+        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &4);
+        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &1.);
     }
 
     #[test]
     pub fn my_flood_request_simple_top() {
         // Client 1 channels
         let (c_send, c_recv) = unbounded();
-        // Drone 11
+        // drone 1 channels
         let (d_send, d_recv) = unbounded();
-        // Drone 12
-        let (d12_send, d12_recv) = unbounded();
-        // Drone 13
-        let (d13_send, d13_recv) = unbounded();
-        // Drone 14
-        let (d14_send, d14_recv) = unbounded();
+
         // SC - needed to not make the drone crash
-        let (_d_command_send, d_command_recv) = unbounded();
-        let (d_event_send, _d_event_rec) = unbounded();
         let (c_event_send, _) = unbounded();
         let (_, c_command_recv) = unbounded();
 
-        // Drone 11
-        let neighbours11 = HashMap::from([
-            (12, d12_send.clone()),
-            (13, d13_send.clone()),
-            (14, d14_send.clone()),
-            (1, c_send.clone()),
-        ]);
-        let mut drone = CppEnjoyersDrone::new(
-            11,
-            d_event_send.clone(),
-            d_command_recv.clone(),
-            d_recv.clone(),
-            neighbours11,
-            0.0,
-        );
-        // Drone 12
-        let neighbours12 = HashMap::from([(11, d_send.clone())]);
-        let mut drone2 = CppEnjoyersDrone::new(
-            12,
-            d_event_send.clone(),
-            d_command_recv.clone(),
-            d12_recv.clone(),
-            neighbours12,
-            0.0,
-        );
-        // Drone 13
-        let neighbours13 = HashMap::from([(11, d_send.clone()), (14, d14_send.clone())]);
-        let mut drone3 = CppEnjoyersDrone::new(
-            13,
-            d_event_send.clone(),
-            d_command_recv.clone(),
-            d13_recv.clone(),
-            neighbours13,
-            0.0,
-        );
-        // Drone 14
-        let neighbours14 = HashMap::from([(11, d_send.clone()), (13, d13_send.clone())]);
-        let mut drone4 = CppEnjoyersDrone::new(
-            14,
-            d_event_send.clone(),
-            d_command_recv.clone(),
-            d14_recv.clone(),
-            neighbours14,
-            0.0,
-        );
-
         // client 1
         let neighbours1 = HashMap::from([(11, d_send.clone())]);
-        let mut client1 = WebBrowser::new(
+        let mut client = WebBrowser::new(
             1,
             c_event_send.clone(),
             c_command_recv,
@@ -156,119 +140,49 @@ mod web_client_tests {
             neighbours1,
         );
 
-        // Spawn the drone's run method in a separate thread
-        thread::spawn(move || {
-            drone.run();
-        });
+        client.start_flooding();
+        assert_eq!(client.sequential_flood_id, 1);
 
-        thread::spawn(move || {
-            drone2.run();
-        });
+        client.handle_packet(Packet::new_flood_response(SourceRoutingHeader::new(vec![12, 11, 1], 2),
+        0, FloodResponse{
+            path_trace: vec![(1, NodeType::Client), (11, NodeType::Drone),(12, NodeType::Drone),],
+            flood_id: 1
+        }));
+        client.handle_packet(Packet::new_flood_response(SourceRoutingHeader::new(vec![12, 11, 1], 2),
+        0, FloodResponse{
+            path_trace: vec![(1, NodeType::Client), (11, NodeType::Drone), (13, NodeType::Drone), ],
+            flood_id: 1
+        }));
+        client.handle_packet(Packet::new_flood_response(SourceRoutingHeader::new(vec![12, 11, 1], 2),
+        0, FloodResponse{
+            path_trace: vec![(1, NodeType::Client), (11, NodeType::Drone), (14, NodeType::Drone), (13, NodeType::Drone) ],
+            flood_id: 1
+        }));
 
-        thread::spawn(move || {
-            drone3.run();
-        });
+        assert!(graphmap_eq(&client.topology_graph, &GraphMap::from_edges([(1, 11, 1.), (11, 1, 1.), (11, 12, 1.), (12, 11, 1.),
+        (13, 11, 1.), (11, 13, 1.), (14, 11, 1.), (11, 14, 1.), (13, 14, 1.), (14, 13, 1.)])));
 
-        thread::spawn(move || {
-            drone4.run();
-        });
+        assert_eq!(client.nodes_type, HashMap::from([(1, GraphNodeType::Client), (11, GraphNodeType::Drone), (12, GraphNodeType::Drone),
+        (13, GraphNodeType::Drone),(14, GraphNodeType::Drone)]))
 
-        sleep(MS500);
-        thread::spawn(move || {
-            client1.run();
-        });
-
-        sleep(MS500);
-
-        /*
-        graph: {
-            1: [(11, Outgoing)],
-            11: [(1, Incoming), (12, Outgoing), (13, Outgoing), (14, Outgoing)],
-            12: [(11, Incoming)],
-            13: [(11, Incoming), (14, Outgoing)],
-            14: [(13, Incoming), (11, Incoming)]
-        }
-        nodes type: {12: Drone, 13: Drone, 14: Drone, 11: Drone}
-        */
     }
 
     #[test]
     pub fn my_flood_request_complex_top() {
         // Client 1 channels
         let (c_send, c_recv) = unbounded();
-        // Client 2 channels
-        let (c2_send, c2_recv) = unbounded();
-        // Drone 11
+
         let (d_send, d_recv) = unbounded();
-        // Drone 12
         let (d12_send, d12_recv) = unbounded();
-        // Drone 13
-        let (d13_send, d13_recv) = unbounded();
-        // Drone 14
-        let (d14_send, d14_recv) = unbounded();
+
+
         // SC - needed to not make the drone crash
-        let (_d_command_send, d_command_recv) = unbounded();
         let (c_event_send, _) = unbounded();
         let (_, c1_command_recv) = unbounded();
-        let (_, c2_command_recv) = unbounded();
-
-        // Drone 11
-        let neighbours11 = HashMap::from([
-            (12, d12_send.clone()),
-            (13, d13_send.clone()),
-            (14, d14_send.clone()),
-            (1, c_send.clone()),
-        ]);
-        let mut drone = CppEnjoyersDrone::new(
-            11,
-            unbounded().0,
-            d_command_recv.clone(),
-            d_recv.clone(),
-            neighbours11,
-            0.0,
-        );
-        // Drone 12
-        let neighbours12 = HashMap::from([(1, c_send.clone()), (11, d_send.clone())]);
-        let mut drone2 = CppEnjoyersDrone::new(
-            12,
-            unbounded().0,
-            d_command_recv.clone(),
-            d12_recv.clone(),
-            neighbours12,
-            0.0,
-        );
-        // Drone 13
-        let neighbours13 = HashMap::from([
-            (11, d_send.clone()),
-            (14, d14_send.clone()),
-            (2, c2_send.clone()),
-        ]);
-        let mut drone3 = CppEnjoyersDrone::new(
-            13,
-            unbounded().0,
-            d_command_recv.clone(),
-            d13_recv.clone(),
-            neighbours13,
-            0.0,
-        );
-        // Drone 14
-        let neighbours14 = HashMap::from([
-            (11, d_send.clone()),
-            (13, d13_send.clone()),
-            (2, c2_send.clone()),
-        ]);
-        let mut drone4 = CppEnjoyersDrone::new(
-            14,
-            unbounded().0,
-            d_command_recv.clone(),
-            d14_recv.clone(),
-            neighbours14,
-            0.0,
-        );
 
         // client 1
         let neighbours1 = HashMap::from([(11, d_send.clone()), (12, d12_send.clone())]);
-        let mut client1 = WebBrowser::new(
+        let mut client = WebBrowser::new(
             1,
             c_event_send.clone(),
             c1_command_recv,
@@ -276,66 +190,32 @@ mod web_client_tests {
             neighbours1,
         );
 
-        // client 2
-        let neighbours2 = HashMap::from([(13, d13_send.clone()), (14, d14_send.clone())]);
-        let mut client2 = WebBrowser::new(
-            2,
-            c_event_send.clone(),
-            c2_command_recv,
-            c2_recv.clone(),
-            neighbours2,
-        );
+        client.handle_packet(Packet::new_flood_response(SourceRoutingHeader::new(vec![12, 11, 1], 2),
+        0, FloodResponse{
+            path_trace: vec![(1, NodeType::Client), (12, NodeType::Drone), (11, NodeType::Drone) ],
+            flood_id: 1
+        }));
 
-        // Spawn the drone's run method in a separate thread
-        thread::spawn(move || {
-            drone.run();
-        });
+        client.handle_packet(Packet::new_flood_response(SourceRoutingHeader::new(vec![12, 11, 1], 2),
+        0, FloodResponse{
+            path_trace: vec![(1, NodeType::Client), (11, NodeType::Drone), (13, NodeType::Drone), (2, NodeType::Client), (14, NodeType::Drone) ],
+            flood_id: 1
+        }));
 
-        thread::spawn(move || {
-            drone2.run();
-        });
+        client.handle_packet(Packet::new_flood_response(SourceRoutingHeader::new(vec![12, 11, 1], 2),
+        0, FloodResponse{
+            path_trace: vec![(1, NodeType::Client), (11, NodeType::Drone), (14, NodeType::Drone), (13, NodeType::Drone) ],
+            flood_id: 1
+        }));
 
-        thread::spawn(move || {
-            drone3.run();
-        });
+        assert!(graphmap_eq(&client.topology_graph, &GraphMap::from_edges([(1, 11, 1.), (11, 1, 1.), (11, 12, 1.), (12, 11, 1.),
+        (13, 11, 1.), (11, 13, 1.), (14, 11, 1.), (11, 14, 1.), (13, 14, 1.), (14, 13, 1.), (1, 12, 1.), (12, 1, 1.),
+        (13, 2, 1.), (14, 2, 1.),])));
 
-        thread::spawn(move || {
-            drone4.run();
-        });
 
-        thread::spawn(move || {
-            client1.run();
-        });
+        assert_eq!(client.nodes_type, HashMap::from([(1, GraphNodeType::Client), (11, GraphNodeType::Drone), (12, GraphNodeType::Drone),
+        (13, GraphNodeType::Drone), (14, GraphNodeType::Drone), (2, GraphNodeType::Client) ]))
 
-        thread::spawn(move || {
-            client2.run();
-        });
-
-        println!("waiting for messages");
-
-        sleep(MS500);
-
-        /*
-        graph: {
-            1: [(12, Outgoing), (12, Incoming), (11, Outgoing), (11, Incoming)],
-            12: [(1, Incoming), (1, Outgoing), (11, Outgoing), (11, Incoming)],
-            11: [(1, Incoming), (1, Outgoing), (12, Incoming), (12, Outgoing), (13, Outgoing), (13, Incoming), (14, Outgoing), (14, Incoming)],
-            13: [(11, Incoming), (11, Outgoing), (14, Outgoing), (14, Incoming), (2, Outgoing)],
-            14: [(13, Incoming), (13, Outgoing), (11, Incoming), (11, Outgoing), (2, Outgoing)],
-            2: [(13, Incoming), (14, Incoming)]}
-        }
-        nodes type: {1: Client, 2: Client, 14: Drone, 11: Drone, 12: Drone, 13: Drone}
-
-        client: 2 - graph: {
-            2: [(14, Outgoing), (14, Incoming), (13, Outgoing), (13, Incoming)],
-            14: [(2, Incoming), (2, Outgoing), (13, Outgoing), (13, Incoming), (11, Outgoing), (11, Incoming)],
-            13: [(2, Incoming), (2, Outgoing), (14, Incoming), (14, Outgoing), (11, Outgoing), (11, Incoming)],
-            11: [(13, Incoming), (13, Outgoing), (14, Incoming), (14, Outgoing), (12, Outgoing), (12, Incoming), (1, Incoming)],
-            12: [(11, Incoming), (11, Outgoing), (1, Outgoing)],
-            1: [(12, Incoming), (11, Incoming)]
-        }
-        nodes type: {2: Client, 1: Client, 13: Drone, 11: Drone, 12: Drone, 14: Drone}
-        */
     }
 
     #[test]
@@ -365,13 +245,13 @@ mod web_client_tests {
             Packet::new_flood_request(
                 SourceRoutingHeader::empty_route(),
                 0,
-                FloodRequest::initialize(0, 1, NodeType::Client)
+                FloodRequest::initialize(1, 1, NodeType::Client)
             )
         );
     }
 
     #[test]
-    pub fn file_list_scl_command() {
+    pub fn file_list_scl_command_1() {
         // client 1 <--> 11 <--> 21 server
 
         // Client 1 channels
@@ -418,7 +298,6 @@ mod web_client_tests {
 
         sleep(MS500);
         c_event_recv.recv().unwrap();
-
         let _flood_request = s_recv.recv().unwrap();
         let flood_response = Packet::new_flood_response(
             SourceRoutingHeader {
@@ -427,7 +306,7 @@ mod web_client_tests {
             },
             0,
             FloodResponse {
-                flood_id: 0,
+                flood_id: 1,
                 path_trace: vec![
                     (1, NodeType::Client),
                     (11, NodeType::Drone),
@@ -443,8 +322,8 @@ mod web_client_tests {
         let _ = c_command_send.send(WebClientCommand::AskListOfFiles(21));
 
         // receive request
-        //println!("{:?}", req);
         let req = s_recv.recv().unwrap();
+        println!("{:?}", req);
         let mut data = Vec::new();
         match req.pack_type {
             PacketType::MsgFragment(f) => data.push(f),
@@ -505,6 +384,9 @@ mod web_client_tests {
                 pack_type: PacketType::Ack(Ack { fragment_index: 0 })
             }
         );
+
+        // ack
+        c_event_recv.recv().unwrap();
 
         let resp = c_event_recv.recv().unwrap();
         println!("--{:?}", resp);
@@ -574,7 +456,7 @@ mod web_client_tests {
             },
             0,
             FloodResponse {
-                flood_id: 0,
+                flood_id: 1,
                 path_trace: vec![
                     (1, NodeType::Client),
                     (11, NodeType::Drone),
@@ -687,8 +569,12 @@ mod web_client_tests {
             }
         );
 
+        // remove packetsent events
+        c_event_recv.recv().unwrap();
+        c_event_recv.recv().unwrap();
+
         let resp = c_event_recv.recv().unwrap();
-        println!("--{:?}", resp);
+        //println!("--{:?}", resp);
 
         if let WebClientEvent::ListOfFiles(files, id) = resp {
             assert_eq!(files, vec!["file1".to_string(), "file2".to_string()]);
@@ -755,7 +641,7 @@ mod web_client_tests {
             },
             0,
             FloodResponse {
-                flood_id: 0,
+                flood_id: 1,
                 path_trace: vec![
                     (1, NodeType::Client),
                     (11, NodeType::Drone),
@@ -806,8 +692,9 @@ mod web_client_tests {
         );
         let _ = d_send.send(nack).unwrap();
         // receive request second time
-        //println!("{:?}", req);
         let req = s_recv.recv().unwrap();
+        println!("---{:?}", req);
+
         let mut data = Vec::new();
         match req.pack_type {
             PacketType::MsgFragment(f) => data.push(f),
@@ -974,6 +861,12 @@ mod web_client_tests {
             }
         );
 
+        // remove packetsent events
+        c_event_recv.recv().unwrap();
+        c_event_recv.recv().unwrap();
+        c_event_recv.recv().unwrap();
+        c_event_recv.recv().unwrap();
+        c_event_recv.recv().unwrap();
         let resp = c_event_recv.recv().unwrap();
         println!("--{:?}", resp);
 
@@ -1042,7 +935,7 @@ mod web_client_tests {
             },
             0,
             FloodResponse {
-                flood_id: 0,
+                flood_id: 1,
                 path_trace: vec![
                     (1, NodeType::Client),
                     (11, NodeType::Drone),
@@ -1121,6 +1014,8 @@ mod web_client_tests {
             }
         );
 
+        // ack
+        c_event_recv.recv().unwrap();
         // control client response to scl
         let resp = c_event_recv.recv().unwrap();
         //println!("--{:?}", resp);
@@ -1189,7 +1084,7 @@ mod web_client_tests {
             },
             0,
             FloodResponse {
-                flood_id: 0,
+                flood_id: 1,
                 path_trace: vec![
                     (1, NodeType::Client),
                     (11, NodeType::Drone),
@@ -1227,7 +1122,7 @@ mod web_client_tests {
             },
             0,
             FloodResponse {
-                flood_id: 0,
+                flood_id: 2,
                 path_trace: vec![
                     (1, NodeType::Client),
                     (11, NodeType::Drone),
@@ -1304,6 +1199,8 @@ mod web_client_tests {
         // control client response to scl
         c_event_recv.recv().unwrap();
         c_event_recv.recv().unwrap();
+        c_event_recv.recv().unwrap();
+        c_event_recv.recv().unwrap();
         let resp = c_event_recv.recv().unwrap();
         //println!("--{:?}", resp);
 
@@ -1331,7 +1228,7 @@ mod web_client_tests {
             c_recv.clone(),
             HashMap::from([(21, s_send.clone())]),
         );
-        client.topology_graph = GraphMap::from_edges([(1, 21, 1), (21, 1, 1)]);
+        client.topology_graph = GraphMap::from_edges([(1, 21, 1.), (21, 1, 1.)]);
         client.nodes_type = HashMap::from([(21, GraphNodeType::Media)]);
         client.packet_id_counter = PacketId::from_u64(1);
 
@@ -1386,7 +1283,7 @@ mod web_client_tests {
             c_recv.clone(),
             HashMap::from([(21, s_send.clone())]),
         );
-        client.topology_graph = GraphMap::from_edges([(1, 21, 1), (21, 1, 1)]);
+        client.topology_graph = GraphMap::from_edges([(1, 21, 1.), (21, 1, 1.)]);
         client.nodes_type = HashMap::from([(21, GraphNodeType::Media)]);
         client.packet_id_counter = PacketId::from_u64(1);
 
@@ -1521,6 +1418,8 @@ mod web_client_tests {
         c_event_recv.recv().unwrap();
         c_event_recv.recv().unwrap();
         c_event_recv.recv().unwrap();
+        c_event_recv.recv().unwrap();
+        c_event_recv.recv().unwrap();
         assert_eq!(
             c_event_recv.recv().unwrap(),
             WebClientEvent::FileFromClient(
@@ -1558,7 +1457,7 @@ mod web_client_tests {
             c_recv.clone(),
             HashMap::from([(21, s_send.clone())]),
         );
-        client.topology_graph = GraphMap::from_edges([(1, 21, 1), (21, 1, 1)]);
+        client.topology_graph = GraphMap::from_edges([(1, 21, 1.), (21, 1, 1.)]);
         client.nodes_type = HashMap::from([(21, GraphNodeType::Media)]);
         client.packet_id_counter = PacketId::from_u64(1);
 
@@ -1750,6 +1649,9 @@ mod web_client_tests {
         c_event_recv.recv().unwrap();
         c_event_recv.recv().unwrap();
         c_event_recv.recv().unwrap();
+        c_event_recv.recv().unwrap();
+        c_event_recv.recv().unwrap();
+        c_event_recv.recv().unwrap();
 
         assert_eq!(
             c_event_recv.recv().unwrap(),
@@ -1830,7 +1732,7 @@ mod web_client_tests {
             c_recv.clone(),
             HashMap::from([(21, s_send.clone())]),
         );
-        client.topology_graph = GraphMap::from_edges([(1, 21, 1), (21, 1, 1)]);
+        client.topology_graph = GraphMap::from_edges([(1, 21, 1.), (21, 1, 1.)]);
         client.nodes_type = HashMap::from([(21, GraphNodeType::Text)]);
 
         let frag = Fragment::from_string(0, 1, "ciao".to_string());
@@ -1874,7 +1776,7 @@ mod web_client_tests {
             c_recv.clone(),
             HashMap::from([(21, s_send.clone())]),
         );
-        client.topology_graph = GraphMap::from_edges([(1, 21, 1), (21, 1, 1)]);
+        client.topology_graph = GraphMap::from_edges([(1, 21, 1.), (21, 1, 1.)]);
         client.nodes_type = HashMap::from([(21, GraphNodeType::Text)]);
 
         let frag = Fragment::from_string(0, 1, "ciao".to_string());
