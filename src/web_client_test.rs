@@ -165,7 +165,6 @@ mod web_client_tests {
 
     }
 
-
     #[test]
     pub fn my_flood_request_simple_top() {
         // Client 1 channels
@@ -1719,47 +1718,6 @@ mod web_client_tests {
         assert!(client.media_request_left.is_empty());
         assert!(client.pending_requests.is_empty());
         assert!(client.stored_files.is_empty());
-    }
-
-    #[test]
-    pub fn filename_from_path(){
-        let path = "a/b/c/d/e/ciao.txt".to_string();
-        assert_eq!(WebBrowser::get_filename_from_path(&path), "ciao.txt".to_string());
-
-        let path = "ciao.txt".to_string();
-        assert_eq!(WebBrowser::get_filename_from_path(&path), "ciao.txt".to_string());
-    }
-
-    #[test]
-    fn file_parsing() {
-        let (_c, c_recv) = unbounded();
-        let (c_event_send, _b) = unbounded();
-        let (_a, c_command_recv) = unbounded();
-
-        let client = WebBrowser::new(
-            1,
-            c_event_send.clone(),
-            c_command_recv.clone(),
-            c_recv.clone(),
-            HashMap::new(),
-        );
-
-        assert_eq!(
-            WebBrowser::get_media_inside_text_file(&"suhbefuiwfbwob".to_string()),
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            WebBrowser::get_media_inside_text_file(
-                &"-----------<img src=\"youtube.com\"\\>".to_string()
-            ),
-            vec!["youtube.com".to_string()]
-        );
-        assert_eq!(
-            WebBrowser::get_media_inside_text_file(
-                &"-----------<img src=\"/usr/tmp/folder/subfolder/pic.jpg\"\\>".to_string()
-            ),
-            vec!["/usr/tmp/folder/subfolder/pic.jpg".to_string()]
-        );
     }
 
     #[test]

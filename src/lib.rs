@@ -1,7 +1,10 @@
 #![warn(clippy::pedantic)]
 
+mod utils;
+
 use common::slc_commands::{ServerType, TextMediaResponse, WebClientCommand, WebClientEvent};
 use compression::huffman::HuffmanCompressor;
+use utils::{get_filename_from_path, get_media_inside_html_file};
 use core::time;
 use crossbeam_channel::{select_biased, Receiver, SendError, Sender};
 use petgraph::algo::astar;
@@ -197,7 +200,6 @@ impl Fragmentable for ResponseMessage {
     }
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RequestType {
     TextList(NodeId),
@@ -357,12 +359,7 @@ impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
 
 impl WebBrowser {
 
-    // ! create file for utils, separate tests in more files, unit vs integration tests,
-
-    // TESTED
-    fn get_filename_from_path(s: &String) -> String{
-        s.split('/').last().unwrap_or(s).to_string()
-    }
+    // ! separate tests in more files, unit vs integration tests,
 
     // TESTED
     fn internal_send_to_controller(&self, msg: WebClientEvent) {
@@ -408,6 +405,7 @@ impl WebBrowser {
 
         // todo
         // search for an entry that, for each of the needed media, it either is in cache or the owner is None
+        
         if let Some(key) = self
             .text_media_map
             .iter()
@@ -441,14 +439,14 @@ impl WebBrowser {
         if let Some(media_list) = self.text_media_map.remove(key) {
             // ! unwrap of the text file must work
             let html_file = (
-                Self::get_filename_from_path(&key.1),
+                get_filename_from_path(&key.1),
                 self.stored_files.remove(&key.1).unwrap(),
             );
             let mut media_files = vec![];
 
             for media_full_name in media_list {
                 media_files.push((
-                    Self::get_filename_from_path(&media_full_name),
+                    get_filename_from_path(&media_full_name),
                     self.stored_files
                         .remove(&media_full_name)
                         .unwrap_or_default(),
@@ -477,6 +475,8 @@ impl WebBrowser {
     }
 
     fn try_send_packet(&mut self, mut p: Packet, dest: NodeId) -> Result<(), SendError<Packet>>{
+
+        // ! refactor
         let mut final_packet: Packet = p.clone();
         match p.pack_type{
             PacketType::MsgFragment(_) => {
@@ -873,19 +873,6 @@ impl WebBrowser {
         }
     }
 
-    fn get_media_inside_text_file(file_str: &str) -> Vec<String> {
-        let document = scraper::Html::parse_document(file_str);
-        let mut ret = vec![];
-        if let Ok(selector) = scraper::Selector::parse("img") {
-            for path in document.select(&selector) {
-                if let Some(path) = path.value().attr("src") {
-                    ret.push(path.to_string());
-                }
-            }
-        }
-        ret
-    }
-
     fn complete_request_with_generic_response(
         &mut self,
         server_id: NodeId,
@@ -951,11 +938,11 @@ impl WebBrowser {
 
                 let file_str = String::from_utf8(file.clone()).unwrap();
 
-                let needed_media = Self::get_media_inside_text_file(&file_str);
+                let needed_media = get_media_inside_html_file(&file_str);
 
                 if needed_media.is_empty() {
                     self.internal_send_to_controller(WebClientEvent::FileFromClient(
-                        TextMediaResponse::new((Self::get_filename_from_path(&text_path), file), Vec::new()),
+                        TextMediaResponse::new((get_filename_from_path(&text_path), file), Vec::new()),
                         server_id,
                     ));
                 } else {
