@@ -1,9 +1,7 @@
 #![warn(clippy::pedantic)]
 
 use common::slc_commands::{ServerType, TextMediaResponse, WebClientCommand, WebClientEvent};
-use petgraph::Direction::Incoming;
 use core::time;
-use std::fmt::Error;
 use crossbeam_channel::{select_biased, Receiver, SendError, Sender};
 use petgraph::algo::astar;
 use petgraph::prelude::DiGraphMap;
@@ -12,7 +10,7 @@ use std::thread::sleep;
 use std::vec;
 use wg_2024::network::{NodeId, SourceRoutingHeader};
 use wg_2024::packet::{
-    self, Ack, FloodRequest, FloodResponse, Fragment, Nack, NackType, NodeType, Packet, PacketType, FRAGMENT_DSIZE
+    Ack, FloodRequest, FloodResponse, Fragment, Nack, NackType, NodeType, Packet, PacketType, FRAGMENT_DSIZE
 };
 
 use common::networking::flooder::Flooder;
@@ -181,6 +179,7 @@ impl Fragmentable for ResponseMessage {
 }
 
 const RING_BUFF_SZ: usize = 64;
+const DEFAULT_PDR: f64 = 0.5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RequestType {
@@ -240,7 +239,7 @@ pub struct WebBrowser {
     //media_file_either_owner_or_counter: HashMap<String, Either<Option<NodeId>, u8>>, // for every media file store either the owner or the n. of remaining media list responses to know the owner
     media_owner: HashMap<String, Option<NodeId>>, // media server which owns the media, if any
     media_request_left: HashMap<String, u8>, // how many media list response I have to wait before knowing that media is unavailable
-    packets_sent_counter: HashMap<NodeId, u64>, // track the number of packets sent through every drone
+    packets_sent_counter: HashMap<NodeId, (u64, u64)>, // track the number of packets (sent, lost) through every drone
 }
 
 impl Flooder for WebBrowser {
@@ -286,8 +285,8 @@ impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
     ) -> Self {
         let mut initial_edges = vec![];
         for node in packet_send.keys() {
-            initial_edges.push((id, *node, 1.));
-            initial_edges.push((*node, id, 1.));
+            initial_edges.push((id, *node, DEFAULT_PDR));
+            initial_edges.push((*node, id, DEFAULT_PDR));
         }
 
         Self {
@@ -473,7 +472,7 @@ impl WebBrowser {
 
                     if let PacketType::MsgFragment(_) = &packet.pack_type{
                         for drone_id in &packet.routing_header.hops[1..]{
-                            self.increment_edge_weight(*drone_id);
+                            self.increment_packet_sent_counter(*drone_id);
                         }
                     }
                     final_packet = packet;
@@ -580,7 +579,7 @@ impl WebBrowser {
             .is_some_and(|dest| dest == self.id)
     }
 
-    fn find_request_index(&self, p: &Packet) -> Option<usize> {
+    fn get_request_index(&self, p: &Packet) -> Option<usize> {
         self.pending_requests
             .iter()
             .position(|req| req.request_id == PacketId::from_u64(p.session_id).get_request_id())
@@ -612,21 +611,21 @@ impl WebBrowser {
             for (id, node_type) in &resp.path_trace {
                 if let Some((from_id, from_type)) = prev {
                     if *id == self.id || from_id == self.id {
-                        self.add_edge_if_not_already_in(from_id, *id, 1.);
-                        self.add_edge_if_not_already_in(*id, from_id, 1.);
+                        self.add_edge_if_not_already_in(from_id, *id, DEFAULT_PDR);
+                        self.add_edge_if_not_already_in(*id, from_id, DEFAULT_PDR);
                     } else {
                         // this prevents A* to find path with client/server in the middle
                         if matches!(from_type, NodeType::Client)
                             | matches!(from_type, NodeType::Server)
                         {
-                            self.add_edge_if_not_already_in(*id, from_id, 1.);
+                            self.add_edge_if_not_already_in(*id, from_id, DEFAULT_PDR);
                         } else if matches!(node_type, NodeType::Client)
                             | matches!(node_type, NodeType::Server)
                         {
-                            self.add_edge_if_not_already_in(from_id, *id, 1.);
+                            self.add_edge_if_not_already_in(from_id, *id, DEFAULT_PDR);
                         } else {
-                            self.add_edge_if_not_already_in(from_id, *id, 1.);
-                            self.add_edge_if_not_already_in(*id, from_id, 1.);
+                            self.add_edge_if_not_already_in(from_id, *id, DEFAULT_PDR);
+                            self.add_edge_if_not_already_in(*id, from_id, DEFAULT_PDR);
                         }
                     }
 
@@ -635,7 +634,7 @@ impl WebBrowser {
 
                     // initialize the packet counter
                     for (drone_id, _) in self.nodes_type.iter().filter(|(_, t)| **t == GraphNodeType::Drone){
-                        self.packets_sent_counter.entry(*drone_id).or_insert(0);
+                        self.packets_sent_counter.entry(*drone_id).insert_entry((0,0));
                     }
                 }
                 prev = Some((*id, *node_type));
@@ -662,7 +661,7 @@ impl WebBrowser {
             return;
         }
 
-        match self.find_request_index(&packet) {
+        match self.get_request_index(&packet) {
             Some(id) => {
                 let req = self.pending_requests.get_mut(id).unwrap();
                 if req
@@ -688,7 +687,7 @@ impl WebBrowser {
             return;
         }
 
-        match self.find_request_index(&packet) {
+        match self.get_request_index(&packet) {
             Some(id) => {
                 let req = self.pending_requests.get_mut(id).unwrap();
 
@@ -735,20 +734,23 @@ impl WebBrowser {
         }
     }
 
-    fn decrement_edge_weight(&mut self, drone_id: NodeId){
-        if let Some(total) = self.packets_sent_counter.get(&drone_id){
-            for (_, _, weight) in self.topology_graph.all_edges_mut().filter(|(_, to, _)| *to == drone_id){
-                *weight = (*weight * *total as f64 - 1.) / *total as f64;
-            }
+    fn increment_packet_lost_counter(&mut self, drone_id: NodeId){
+        self.packets_sent_counter.entry(drone_id).and_modify(|(sent, c)| if *c < *sent {*c += 1} );
+
+        let pdr = self.packets_sent_counter.get(&drone_id).map_or(1., |(d, n)| *n as f64 / *d as f64);
+
+        for (_, _, weight) in self.topology_graph.all_edges_mut().filter(|(_, to, _)| *to == drone_id){
+            *weight = pdr;
         }
     }
 
-    fn increment_edge_weight(&mut self, drone_id: NodeId){
-        self.packets_sent_counter.entry(drone_id).and_modify(|c| *c += 1);
-        if let Some(total) = self.packets_sent_counter.get(&drone_id){
-            for (_, _, weight) in self.topology_graph.all_edges_mut().filter(|(_, to, _)| *to == drone_id){
-                *weight = (*weight * (*total as f64 - 1.) + 1.) / *total as f64;
-            }
+    fn increment_packet_sent_counter(&mut self, drone_id: NodeId){
+        self.packets_sent_counter.entry(drone_id).and_modify(|(c, _)| *c += 1);
+
+        let pdr = self.packets_sent_counter.get(&drone_id).map_or(1., |(d, n)| *n as f64 / *d as f64);
+
+        for (_, _, weight) in self.topology_graph.all_edges_mut().filter(|(_, to, _)| *to == drone_id){
+            *weight = pdr;
         }
     }
 
@@ -758,7 +760,7 @@ impl WebBrowser {
             return;
         }
 
-        match self.find_request_index(&packet) {
+        match self.get_request_index(&packet) {
             Some(id) => {
                 let req = self.pending_requests.get_mut(id).unwrap();
 
@@ -793,7 +795,7 @@ impl WebBrowser {
                         // update edges weight
                         if let NackType::Dropped = nack.nack_type {
                             if let Some(drone_id) = packet.routing_header.source(){
-                                self.decrement_edge_weight(drone_id);
+                                self.increment_packet_lost_counter(drone_id);
                             }
                         }
                     }
@@ -849,10 +851,6 @@ impl WebBrowser {
                 self.handle_fragment(packet, &fragment);
             }
         }
-    }
-
-    fn send_ack(&mut self, server_id: NodeId, session_id: u64, fragment_index: u64) {
-
     }
 
     fn get_media_inside_text_file(file_str: &str) -> Vec<String> {
@@ -1096,8 +1094,8 @@ impl WebBrowser {
         match command {
             WebClientCommand::AddSender(id, sender) => {
                 self.packet_send.insert(id, sender);
-                self.add_edge_if_not_already_in(self.id, id, 1.);
-                self.add_edge_if_not_already_in(id, self.id, 1.);
+                self.add_edge_if_not_already_in(self.id, id, DEFAULT_PDR);
+                self.add_edge_if_not_already_in(id, self.id, DEFAULT_PDR);
                 self.start_flooding();
             }
 

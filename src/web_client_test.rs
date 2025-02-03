@@ -83,7 +83,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn increase_packet_sent_counter(){
+    pub fn packet_sent_counter(){
         // Client 1 channels
         let (c_send, c_recv) = unbounded();
         // drone 1 channels
@@ -96,28 +96,75 @@ mod web_client_tests {
         let mut client = WebBrowser::new(1, c_event_send.clone(),
         c_command_recv.clone(), c_recv.clone(), HashMap::from([(11, d_send.clone())]));
 
-        client.packets_sent_counter.insert(11, 0);
-        client.increment_edge_weight(11);
-        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &1);
-        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &1.);
-
-        client.increment_edge_weight(11);
-        client.increment_edge_weight(11);
-        client.increment_edge_weight(11);
-        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &4);
+        client.packets_sent_counter.insert(11, (0,0));
+        client.increment_packet_sent_counter(11);
+        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(1, 0));
         assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &0.);
 
-        client.decrement_edge_weight(11);
-        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &4);
+        client.increment_packet_lost_counter(11);
+        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(1, 1));
+        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &1.);
+
+        client.increment_packet_sent_counter(11);
+        client.increment_packet_sent_counter(11);
+        client.increment_packet_sent_counter(11);
+        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(4, 1));
         assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &0.25);
 
-        client.decrement_edge_weight(11);
-        client.decrement_edge_weight(11);
-        client.decrement_edge_weight(11);
-        client.decrement_edge_weight(11);
-        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &4);
+        client.increment_packet_lost_counter(11);
+        client.increment_packet_lost_counter(11);
+        client.increment_packet_lost_counter(11);
+        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(4, 4));
+        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &1.);
+
+        client.increment_packet_lost_counter(11);
+        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(4, 4));
         assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &1.);
     }
+
+    #[test]
+    pub fn graph_weight_update(){
+        // Client 1 channels
+        let (c_send, c_recv) = unbounded();
+        // drone 1 channels
+        let (d_send, d_recv) = unbounded();
+
+        // SC - needed to not make the drone crash
+        let (c_event_send, _) = unbounded();
+        let (_, c_command_recv) = unbounded();
+
+        let mut client = WebBrowser::new(1, c_event_send.clone(),
+        c_command_recv.clone(), c_recv.clone(), HashMap::from([(11, d_send.clone())]));
+        client.topology_graph = GraphMap::from_edges([(1, 11, DEFAULT_PDR), (11, 1, DEFAULT_PDR),(1, 12, DEFAULT_PDR),(12, 1, DEFAULT_PDR),(12, 21, DEFAULT_PDR),
+        (11, 21, DEFAULT_PDR), ]);
+
+        client.packets_sent_counter.insert(11, (0,0));
+        client.packets_sent_counter.insert(12, (0,0));
+
+        client.increment_packet_sent_counter(11);
+        assert_eq!(client.topology_graph.edge_weight(client.id, 11).unwrap(), &0.);
+        client.increment_packet_lost_counter(11);
+        assert_eq!(client.topology_graph.edge_weight(client.id, 11).unwrap(), &1.);
+        client.increment_packet_sent_counter(11);
+        client.increment_packet_sent_counter(11);
+        client.increment_packet_sent_counter(11);
+        assert_eq!(client.topology_graph.edge_weight(client.id, 11).unwrap(), &0.25);
+        client.increment_packet_lost_counter(11);
+        client.increment_packet_lost_counter(11);
+        client.increment_packet_lost_counter(11);
+        assert_eq!(client.topology_graph.edge_weight(client.id, 11).unwrap(), &1.);
+
+
+
+
+        client.increment_packet_sent_counter(12);
+        client.increment_packet_sent_counter(12);
+        client.increment_packet_sent_counter(12);
+        client.increment_packet_lost_counter(12);
+        assert_eq!(*client.topology_graph.edge_weight(client.id, 12).unwrap(), 1./3.);
+
+    }
+
 
     #[test]
     pub fn my_flood_request_simple_top() {
@@ -159,8 +206,8 @@ mod web_client_tests {
             flood_id: 1
         }));
 
-        assert!(graphmap_eq(&client.topology_graph, &GraphMap::from_edges([(1, 11, 1.), (11, 1, 1.), (11, 12, 1.), (12, 11, 1.),
-        (13, 11, 1.), (11, 13, 1.), (14, 11, 1.), (11, 14, 1.), (13, 14, 1.), (14, 13, 1.)])));
+        assert!(graphmap_eq(&client.topology_graph, &GraphMap::from_edges([(1, 11, DEFAULT_PDR), (11, 1, DEFAULT_PDR), (11, 12, DEFAULT_PDR), (12, 11, DEFAULT_PDR),
+        (13, 11, DEFAULT_PDR), (11, 13, DEFAULT_PDR), (14, 11, DEFAULT_PDR), (11, 14, DEFAULT_PDR), (13, 14, DEFAULT_PDR), (14, 13, DEFAULT_PDR)])));
 
         assert_eq!(client.nodes_type, HashMap::from([(1, GraphNodeType::Client), (11, GraphNodeType::Drone), (12, GraphNodeType::Drone),
         (13, GraphNodeType::Drone),(14, GraphNodeType::Drone)]))
@@ -208,9 +255,9 @@ mod web_client_tests {
             flood_id: 1
         }));
 
-        assert!(graphmap_eq(&client.topology_graph, &GraphMap::from_edges([(1, 11, 1.), (11, 1, 1.), (11, 12, 1.), (12, 11, 1.),
-        (13, 11, 1.), (11, 13, 1.), (14, 11, 1.), (11, 14, 1.), (13, 14, 1.), (14, 13, 1.), (1, 12, 1.), (12, 1, 1.),
-        (13, 2, 1.), (14, 2, 1.),])));
+        assert!(graphmap_eq(&client.topology_graph, &GraphMap::from_edges([(1, 11, DEFAULT_PDR), (11, 1, DEFAULT_PDR), (11, 12, DEFAULT_PDR), (12, 11, DEFAULT_PDR),
+        (13, 11, DEFAULT_PDR), (11, 13, DEFAULT_PDR), (14, 11, DEFAULT_PDR), (11, 14, DEFAULT_PDR), (13, 14, DEFAULT_PDR), (14, 13, DEFAULT_PDR), (1, 12, DEFAULT_PDR), (12, 1, DEFAULT_PDR),
+        (13, 2, DEFAULT_PDR), (14, 2, DEFAULT_PDR),])));
 
 
         assert_eq!(client.nodes_type, HashMap::from([(1, GraphNodeType::Client), (11, GraphNodeType::Drone), (12, GraphNodeType::Drone),
@@ -1228,7 +1275,7 @@ mod web_client_tests {
             c_recv.clone(),
             HashMap::from([(21, s_send.clone())]),
         );
-        client.topology_graph = GraphMap::from_edges([(1, 21, 1.), (21, 1, 1.)]);
+        client.topology_graph = GraphMap::from_edges([(1, 21, DEFAULT_PDR), (21, 1, DEFAULT_PDR)]);
         client.nodes_type = HashMap::from([(21, GraphNodeType::Media)]);
         client.packet_id_counter = PacketId::from_u64(1);
 
@@ -1283,7 +1330,7 @@ mod web_client_tests {
             c_recv.clone(),
             HashMap::from([(21, s_send.clone())]),
         );
-        client.topology_graph = GraphMap::from_edges([(1, 21, 1.), (21, 1, 1.)]);
+        client.topology_graph = GraphMap::from_edges([(1, 21, DEFAULT_PDR), (21, 1, DEFAULT_PDR)]);
         client.nodes_type = HashMap::from([(21, GraphNodeType::Media)]);
         client.packet_id_counter = PacketId::from_u64(1);
 
@@ -1457,7 +1504,7 @@ mod web_client_tests {
             c_recv.clone(),
             HashMap::from([(21, s_send.clone())]),
         );
-        client.topology_graph = GraphMap::from_edges([(1, 21, 1.), (21, 1, 1.)]);
+        client.topology_graph = GraphMap::from_edges([(1, 21, DEFAULT_PDR), (21, 1, DEFAULT_PDR)]);
         client.nodes_type = HashMap::from([(21, GraphNodeType::Media)]);
         client.packet_id_counter = PacketId::from_u64(1);
 
@@ -1732,7 +1779,7 @@ mod web_client_tests {
             c_recv.clone(),
             HashMap::from([(21, s_send.clone())]),
         );
-        client.topology_graph = GraphMap::from_edges([(1, 21, 1.), (21, 1, 1.)]);
+        client.topology_graph = GraphMap::from_edges([(1, 21, DEFAULT_PDR), (21, 1, DEFAULT_PDR)]);
         client.nodes_type = HashMap::from([(21, GraphNodeType::Text)]);
 
         let frag = Fragment::from_string(0, 1, "ciao".to_string());
@@ -1776,7 +1823,7 @@ mod web_client_tests {
             c_recv.clone(),
             HashMap::from([(21, s_send.clone())]),
         );
-        client.topology_graph = GraphMap::from_edges([(1, 21, 1.), (21, 1, 1.)]);
+        client.topology_graph = GraphMap::from_edges([(1, 21, DEFAULT_PDR), (21, 1, DEFAULT_PDR)]);
         client.nodes_type = HashMap::from([(21, GraphNodeType::Text)]);
 
         let frag = Fragment::from_string(0, 1, "ciao".to_string());
