@@ -1,6 +1,7 @@
 #![warn(clippy::pedantic)]
 
 use common::slc_commands::{ServerType, TextMediaResponse, WebClientCommand, WebClientEvent};
+use compression::huffman::HuffmanCompressor;
 use core::time;
 use crossbeam_channel::{select_biased, Receiver, SendError, Sender};
 use petgraph::algo::astar;
@@ -18,7 +19,7 @@ use common::ring_buffer::RingBuffer;
 use common::web_messages;
 use common::web_messages::{
     Compression, GenericResponse, MediaResponse, RequestMessage, Response, ResponseMessage,
-    Serializable, SerializationError, TextResponse,
+    Serializable, SerializableSerde, SerializationError, TextResponse,
 };
 use common::Client;
 use compression::lzw::LZWCompressor;
@@ -28,6 +29,10 @@ mod packet_id;
 use packet_id::{PacketId, RequestId};
 
 mod web_client_test;
+
+const RING_BUFF_SZ: usize = 64;
+const DEFAULT_PDR: f64 = 0.5;
+
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GraphNodeType {
@@ -106,7 +111,7 @@ impl Fragmentable for RequestMessage {
 
         let decompressed = match compr {
             Compression::LZW => {
-                let compressed = <Vec<u16>>::deserialize(msg)?;
+                let compressed = <Vec<u16> as Serializable>::deserialize(msg)?;
 
                 LZWCompressor::new().decompress(compressed).map_err(|e| {
                     println!("{e}");
@@ -116,7 +121,14 @@ impl Fragmentable for RequestMessage {
 
             Compression::None => msg,
 
-            Compression::Huffman => todo!()
+            Compression::Huffman => {
+                let compressed = <<HuffmanCompressor as Compressor>::Compressed>::deserialize(msg)?;
+
+                HuffmanCompressor::new().decompress(compressed).map_err(|e| {
+                    println!("{e}");
+                    SerializationError
+                })?
+            }
         };
 
         Self::deserialize(decompressed)
@@ -163,7 +175,7 @@ impl Fragmentable for ResponseMessage {
 
         let decompressed = match compr {
             Compression::LZW => {
-                let compressed = <Vec<u16>>::deserialize(msg)?;
+                let compressed = <Vec<u16> as Serializable>::deserialize(msg)?;
                 LZWCompressor::new()
                     .decompress(compressed)
                     .map_err(|_| SerializationError)?
@@ -171,15 +183,20 @@ impl Fragmentable for ResponseMessage {
 
             Compression::None => msg,
 
-            Compression::Huffman => todo!()
+            Compression::Huffman => {
+                let compressed = <<HuffmanCompressor as Compressor>::Compressed>::deserialize(msg)?;
+
+                HuffmanCompressor::new().decompress(compressed).map_err(|e| {
+                    println!("{e}");
+                    SerializationError
+                })?
+            }
         };
 
         Self::deserialize(decompressed)
     }
 }
 
-const RING_BUFF_SZ: usize = 64;
-const DEFAULT_PDR: f64 = 0.5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RequestType {
@@ -339,6 +356,9 @@ impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
 }
 
 impl WebBrowser {
+
+    // ! create file for utils, separate tests in more files, unit vs integration tests,
+
     // TESTED
     fn get_filename_from_path(s: &String) -> String{
         s.split('/').last().unwrap_or(s).to_string()
