@@ -9,12 +9,6 @@ pub type RequestId = u16;
 
 #[derive(Debug, Hash, Clone, PartialEq, Eq)]
 
-/*
-    Since NACK doesn't contain the fragment_index I need to store it somewhere
-    this wrapper for the session_id uses the 16 LSB for the id of the request
-    and the remaining 48 for the packet_id (the actual session_id)
-*/
-
 pub struct PacketId {
     packet_id: SessionId, // only 48 LSB used
     req_id: RequestId,

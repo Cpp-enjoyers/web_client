@@ -1,5 +1,4 @@
-
-pub fn get_filename_from_path(s: &String) -> String{
+pub fn get_filename_from_path(s: &String) -> String {
     s.split('/').last().unwrap_or(s).to_string()
 }
 
@@ -21,9 +20,8 @@ mod utils_test {
 
     use crate::utils::{get_filename_from_path, get_media_inside_html_file};
 
-
     #[test]
-    pub fn filename_from_path(){
+    pub fn filename_from_path() {
         let path = "a/b/c/d/e/ciao.txt".to_string();
         assert_eq!(get_filename_from_path(&path), "ciao.txt".to_string());
 
@@ -38,9 +36,7 @@ mod utils_test {
             Vec::<String>::new()
         );
         assert_eq!(
-            get_media_inside_html_file(
-                &"-----------<img src=\"youtube.com\"\\>".to_string()
-            ),
+            get_media_inside_html_file(&"-----------<img src=\"youtube.com\"\\>".to_string()),
             vec!["youtube.com".to_string()]
         );
         assert_eq!(

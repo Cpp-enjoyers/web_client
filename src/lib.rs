@@ -4,17 +4,21 @@ mod utils;
 
 use common::slc_commands::{ServerType, TextMediaResponse, WebClientCommand, WebClientEvent};
 use compression::huffman::HuffmanCompressor;
-use utils::{get_filename_from_path, get_media_inside_html_file};
 use core::time;
 use crossbeam_channel::{select_biased, Receiver, SendError, Sender};
+use itertools::Either;
 use petgraph::algo::astar;
 use petgraph::prelude::DiGraphMap;
+use scraper::node;
 use std::collections::{HashMap, VecDeque};
+use std::os::fd::OwnedFd;
 use std::thread::sleep;
 use std::vec;
+use utils::{get_filename_from_path, get_media_inside_html_file};
 use wg_2024::network::{NodeId, SourceRoutingHeader};
 use wg_2024::packet::{
-    Ack, FloodRequest, FloodResponse, Fragment, Nack, NackType, NodeType, Packet, PacketType, FRAGMENT_DSIZE
+    Ack, FloodRequest, FloodResponse, Fragment, Nack, NackType, NodeType, Packet, PacketType,
+    FRAGMENT_DSIZE,
 };
 
 use common::networking::flooder::Flooder;
@@ -35,7 +39,6 @@ mod web_client_test;
 
 const RING_BUFF_SZ: usize = 64;
 const DEFAULT_PDR: f64 = 0.5;
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GraphNodeType {
@@ -127,10 +130,12 @@ impl Fragmentable for RequestMessage {
             Compression::Huffman => {
                 let compressed = <<HuffmanCompressor as Compressor>::Compressed>::deserialize(msg)?;
 
-                HuffmanCompressor::new().decompress(compressed).map_err(|e| {
-                    println!("{e}");
-                    SerializationError
-                })?
+                HuffmanCompressor::new()
+                    .decompress(compressed)
+                    .map_err(|e| {
+                        println!("{e}");
+                        SerializationError
+                    })?
             }
         };
 
@@ -189,10 +194,12 @@ impl Fragmentable for ResponseMessage {
             Compression::Huffman => {
                 let compressed = <<HuffmanCompressor as Compressor>::Compressed>::deserialize(msg)?;
 
-                HuffmanCompressor::new().decompress(compressed).map_err(|e| {
-                    println!("{e}");
-                    SerializationError
-                })?
+                HuffmanCompressor::new()
+                    .decompress(compressed)
+                    .map_err(|e| {
+                        println!("{e}");
+                        SerializationError
+                    })?
             }
         };
 
@@ -255,9 +262,9 @@ pub struct WebBrowser {
     packets_to_bo_sent_again: VecDeque<(PacketId, Fragment)>, // stores the outgoing fragment for which I couldn't find a path or I received a NACK back instead of ACK
     text_media_map: HashMap<(NodeId, String), Vec<String>>, // links a text filename and the nodeId that provided it to the media filenames that it requires
     stored_files: HashMap<String, Vec<u8>>,                 // filename -> file
-    //media_file_either_owner_or_counter: HashMap<String, Either<Option<NodeId>, u8>>, // for every media file store either the owner or the n. of remaining media list responses to know the owner
-    media_owner: HashMap<String, Option<NodeId>>, // media server which owns the media, if any
-    media_request_left: HashMap<String, u8>, // how many media list response I have to wait before knowing that media is unavailable
+    media_file_either_owner_or_request_left: HashMap<String, Either<Option<NodeId>, Vec<NodeId>>>, // for every media file store either the owner or the n. of remaining media list responses to know the owner
+    //media_owner: HashMap<String, Option<NodeId>>, // media server which owns the media, if any
+    //media_request_left: HashMap<String, Vec<NodeId>>, // how many media list response I have to wait before knowing that media is unavailable
     packets_sent_counter: HashMap<NodeId, (u64, u64)>, // track the number of packets (sent, lost) through every drone
 }
 
@@ -324,9 +331,10 @@ impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
             packets_to_bo_sent_again: VecDeque::new(),
             text_media_map: HashMap::new(),
             stored_files: HashMap::new(),
-            media_request_left: HashMap::new(),
-            media_owner: HashMap::new(),
-            packets_sent_counter: HashMap::new()
+            //media_request_left: HashMap::new(),
+            //media_owner: HashMap::new(),
+            packets_sent_counter: HashMap::new(),
+            media_file_either_owner_or_request_left: HashMap::new(),
         }
     }
 
@@ -358,8 +366,7 @@ impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
 }
 
 impl WebBrowser {
-
-    // ! separate tests in more files, unit vs integration tests,
+    // ! separate tests in more files, unit vs integration tests, logs
 
     // TESTED
     fn internal_send_to_controller(&self, msg: WebClientEvent) {
@@ -382,9 +389,17 @@ impl WebBrowser {
                     frag.clone(),
                 );
 
-                if let Err(e) = self.try_send_packet(packet.clone(), req.server_id){
-                    self.packets_to_bo_sent_again
-                        .push_back((PacketId::from_u64(e.0.session_id), frag));
+                match self.try_send_packet(packet.clone(), req.server_id) {
+                    Ok(packet_sent) => {
+                        for drone_id in &packet_sent.routing_header.hops[1..] {
+                            self.increment_packet_sent_counter(*drone_id);
+                        }
+                    }
+
+                    Err(e) => {
+                        self.packets_to_bo_sent_again
+                            .push_back((PacketId::from_u64(e.0.session_id), frag));
+                    }
                 }
             } else {
                 println!("client {} - Found a packet in waiting_for_flood without the corresponding request. BUG", self.id);
@@ -393,6 +408,7 @@ impl WebBrowser {
         }
     }
 
+    // TESTED
     fn try_complete_request(&mut self) {
         if let Some(i) = self
             .pending_requests
@@ -403,25 +419,37 @@ impl WebBrowser {
             self.complete_request(req);
         }
 
-        // todo
         // search for an entry that, for each of the needed media, it either is in cache or the owner is None
-        
+
         if let Some(key) = self
             .text_media_map
             .iter()
             .find(|(_, list)| {
                 for f in *list {
-                    if (self
-                        .media_owner
+                    let owner_can_still_be_discovered = self
+                        .media_file_either_owner_or_request_left
                         .get(f)
-                        .is_some_and(std::option::Option::is_none)
-                        && self.media_request_left.get(f).is_some_and(|r| *r > 0)
-                        && !self.stored_files.contains_key(f))
-                        || (!self.stored_files.contains_key(f)
-                            && self
-                                .media_owner
-                                .get(f)
-                                .is_some_and(std::option::Option::is_some))
+                        .is_some_and(|either| {
+                            if let itertools::Either::Right(requests_left) = either {
+                                return !requests_left.is_empty();
+                            }
+                            false
+                        });
+
+                    let media_is_already_stored = self.stored_files.contains_key(f);
+
+                    let owner_is_in_the_graph = self
+                        .media_file_either_owner_or_request_left
+                        .get(f)
+                        .is_some_and(|either| {
+                            if let itertools::Either::Left(owner) = either {
+                                return owner.is_some();
+                            }
+                            false
+                        });
+
+                    if !media_is_already_stored
+                        && (owner_can_still_be_discovered || owner_is_in_the_graph)
                     {
                         return false;
                     }
@@ -434,6 +462,7 @@ impl WebBrowser {
         }
     }
 
+    // TESTED
     fn send_text_and_media_back(&mut self, key: &(NodeId, String)) {
         println!("send_text_and_media_back");
         if let Some(media_list) = self.text_media_map.remove(key) {
@@ -451,8 +480,8 @@ impl WebBrowser {
                         .remove(&media_full_name)
                         .unwrap_or_default(),
                 ));
-                self.media_owner.remove(&media_full_name);
-                self.media_request_left.remove(&media_full_name);
+                self.media_file_either_owner_or_request_left
+                    .remove(&media_full_name);
             }
 
             self.internal_send_to_controller(WebClientEvent::FileFromClient(
@@ -462,98 +491,57 @@ impl WebBrowser {
         }
     }
 
+    // TESTED
     fn shortcut(&self, packet: Packet) {
-        //packet.routing_header.decrease_hop_index();
         match packet.routing_header.destination() {
             Some(_) => {
                 self.internal_send_to_controller(WebClientEvent::Shortcut(packet));
             }
             None => {
-                println!("Client {} - Packet doesn't contain a destination, unable to shortcut, dropping", self.id);
+                println!("Client {} - Packet doesn't contain a destination, it's pointless to shortcut, dropping", self.id);
             }
         }
     }
 
-    fn try_send_packet(&mut self, mut p: Packet, dest: NodeId) -> Result<(), SendError<Packet>>{
-
-        // ! refactor
+    // TESTED
+    fn try_send_packet(&self, p: Packet, dest: NodeId) -> Result<Packet, SendError<Packet>> {
         let mut final_packet: Packet = p.clone();
-        match p.pack_type{
+        let mut opt_chn = None;
+        match p.pack_type {
             PacketType::MsgFragment(_) => {
-                let (packet, channel) = self.prepare_packet_routing(p, dest);
-                if let Some(channel) = channel {
-                    if let Err(e) = channel.send(packet.clone()) {
-                        println!("client {} - CANNOT send packet {:?} : {e}", self.id, e.0);
-                        return Err(e);
-                    }
-                    let _ = self
-                        .controller_send
-                        .send(WebClientEvent::PacketSent(packet.clone()));
-
-                    if let PacketType::MsgFragment(_) = &packet.pack_type{
-                        for drone_id in &packet.routing_header.hops[1..]{
-                            self.increment_packet_sent_counter(*drone_id);
-                        }
-                    }
-                    final_packet = packet;
-                }
-                else {
-                    return Err(SendError(packet));
-                }
-
+                (final_packet, opt_chn) = self.prepare_packet_routing(p, dest);
             }
 
             PacketType::FloodResponse(_) => {
-                if let Some(channel) = self.packet_send.get(&dest) {
-                    p.routing_header.increase_hop_index();
-                    if let Err(e) = channel.send(p.clone()) {
-                        println!("client {} - CANNOT send packet {:?} : {e}", self.id, e.0);
-                        return Err(e);
-                    }
-                    final_packet = p;
-                }
+                final_packet.routing_header.increase_hop_index();
+                opt_chn = self.packet_send.get(&dest);
             }
 
-            PacketType::Nack(_) => {
-                if let (packet, Some(channel)) = self.prepare_packet_routing(p, dest) {
-                    if let Err(e) = channel.send(packet.clone()) {
-                        println!("client {} - CANNOT send packet {:?} : {e}", self.id, e.0);
-                        return Err(e);
-                    }
-                    final_packet = packet;
-                }
-
+            PacketType::Nack(_) | PacketType::Ack(_) => {
+                (final_packet, opt_chn) = self.prepare_packet_routing(p, dest);
             }
 
-            PacketType::Ack(_) => {
-                let (mut packet, opt_chn) = self.prepare_packet_routing(p, dest);
-                if let Some(channel) = opt_chn {
-                    if let Err(e) = channel.send(packet.clone()) {
-                        println!("client {} - CANNOT send packet {:?} : {e}", self.id, e.0);
-                        return Err(e);
-                    }
-                    final_packet = packet
-                }
+            PacketType::FloodRequest(_) => {
+                opt_chn = self.packet_send.get(&dest);
             }
-
-            _ => unreachable!()
-
         }
-        self.controller_send.send(WebClientEvent::PacketSent(final_packet));
-        Ok(())
+
+        if let Some(channel) = opt_chn {
+            if let Err(e) = channel.send(final_packet.clone()) {
+                println!("client {} - CANNOT send packet: {e}", self.id);
+                return Err(e);
+            }
+
+            let _ = self
+                .controller_send
+                .send(WebClientEvent::PacketSent(final_packet.clone()));
+            return Ok(final_packet);
+        } else {
+            return Err(SendError(final_packet));
+        }
     }
 
-    fn source_routing_header_from_graph_search(&self, dest: NodeId) -> Option<SourceRoutingHeader> {
-        astar(
-            &self.topology_graph,
-            self.id,
-            |n| n == dest,
-            |(_, _, weight)| *weight,
-            |_| 0.,
-        )
-        .map(|(_, path)| wg_2024::network::SourceRoutingHeader::with_first_hop(path))
-    }
-
+    // TESTED
     fn is_correct_server_type(&self, server_id: NodeId, requested_type: &GraphNodeType) -> bool {
         self.nodes_type
             .get(&server_id)
@@ -561,10 +549,11 @@ impl WebBrowser {
     }
 
     /*
-       Given a packet, id and destination it search for a path in the graph and returns
-       an updated packet and an optional channel.
-       if no path exist or the channel isn't open, the option is None
+       Given a packet, id and destination it searches for a path in the graph and returns
+       an updated packet with the new header and an optional channel.
+       if no path exist or the channel isn't open, the returned option is None
     */
+    // TESTED
     fn prepare_packet_routing(
         &self,
         mut packet: Packet,
@@ -572,7 +561,16 @@ impl WebBrowser {
     ) -> (Packet, Option<&Sender<Packet>>) {
         packet.routing_header = SourceRoutingHeader::empty_route();
 
-        if let Some(routing_header) = self.source_routing_header_from_graph_search(dest) {
+        let opt_header= astar(
+            &self.topology_graph,
+            self.id,
+            |n| n == dest,
+            |(_, _, weight)| *weight,
+            |_| 0.,
+        )
+        .map(|(_, path)| wg_2024::network::SourceRoutingHeader::with_first_hop(path));
+
+        if let Some(routing_header) = opt_header {
             if let Some(id) = routing_header.current_hop() {
                 if let Some(channel) = self.packet_send.get(&id) {
                     match packet.pack_type {
@@ -605,11 +603,54 @@ impl WebBrowser {
             .position(|req| req.request_id == PacketId::from_u64(p.session_id).get_request_id())
     }
 
-    fn add_edge_if_not_already_in(&mut self, from: NodeId, to: NodeId, weight: f64){
-        if !self.topology_graph.contains_edge(from, to){
+    fn add_edge_if_not_already_in(&mut self, from: NodeId, to: NodeId, weight: f64) {
+        if !self.topology_graph.contains_edge(from, to) {
             self.topology_graph.add_edge(from, to, weight);
         }
     }
+
+    fn increment_packet_lost_counter(&mut self, drone_id: NodeId) {
+        self.packets_sent_counter
+            .entry(drone_id)
+            .and_modify(|(sent, c)| {
+                if *c < *sent {
+                    *c += 1
+                }
+            });
+
+        let pdr = self
+            .packets_sent_counter
+            .get(&drone_id)
+            .map_or(1., |(d, n)| *n as f64 / *d as f64);
+
+        for (_, _, weight) in self
+            .topology_graph
+            .all_edges_mut()
+            .filter(|(_, to, _)| *to == drone_id)
+        {
+            *weight = pdr;
+        }
+    }
+
+    fn increment_packet_sent_counter(&mut self, drone_id: NodeId) {
+        self.packets_sent_counter
+            .entry(drone_id)
+            .and_modify(|(c, _)| *c += 1);
+
+        let pdr = self
+            .packets_sent_counter
+            .get(&drone_id)
+            .map_or(1., |(d, n)| *n as f64 / *d as f64);
+
+        for (_, _, weight) in self
+            .topology_graph
+            .all_edges_mut()
+            .filter(|(_, to, _)| *to == drone_id)
+        {
+            *weight = pdr;
+        }
+    }
+
 
     fn handle_flood_response(&mut self, packet: Packet, resp: &FloodResponse) {
         let initiator: Option<&(NodeId, NodeType)> = resp.path_trace.first();
@@ -622,9 +663,12 @@ impl WebBrowser {
             return;
         }
 
-        if initiator.unwrap().0 == self.id{
-            if resp.flood_id < self.sequential_flood_id{
-                println!("client {} -received an old flood response, dropping", self.id);
+        if initiator.unwrap().0 == self.id {
+            if resp.flood_id < self.sequential_flood_id {
+                println!(
+                    "client {} -received an old flood response, dropping",
+                    self.id
+                );
                 return;
             }
             let mut prev: Option<(NodeId, NodeType)> = None;
@@ -653,8 +697,14 @@ impl WebBrowser {
                         .insert(*id, GraphNodeType::from_node_type(*node_type));
 
                     // initialize the packet counter
-                    for (drone_id, _) in self.nodes_type.iter().filter(|(_, t)| **t == GraphNodeType::Drone){
-                        self.packets_sent_counter.entry(*drone_id).insert_entry((0,0));
+                    for (drone_id, _) in self
+                        .nodes_type
+                        .iter()
+                        .filter(|(_, t)| **t == GraphNodeType::Drone)
+                    {
+                        self.packets_sent_counter
+                            .entry(*drone_id)
+                            .insert_entry((0, 0));
                     }
                 }
                 prev = Some((*id, *node_type));
@@ -665,8 +715,8 @@ impl WebBrowser {
                 self.id, self.topology_graph, self.nodes_type
             );
         } else if let Some(next_hop_drone_id) = packet.routing_header.next_hop() {
-            if let Err(e) = self.try_send_packet(packet, next_hop_drone_id){
-                // I don't have the channel to forward the packet - SHORTCUT
+            if let Err(e) = self.try_send_packet(packet, next_hop_drone_id) {
+                // I don't have the channel to forward the flood response - SHORTCUT
                 self.shortcut(e.0);
             }
         } else {
@@ -754,26 +804,6 @@ impl WebBrowser {
         }
     }
 
-    fn increment_packet_lost_counter(&mut self, drone_id: NodeId){
-        self.packets_sent_counter.entry(drone_id).and_modify(|(sent, c)| if *c < *sent {*c += 1} );
-
-        let pdr = self.packets_sent_counter.get(&drone_id).map_or(1., |(d, n)| *n as f64 / *d as f64);
-
-        for (_, _, weight) in self.topology_graph.all_edges_mut().filter(|(_, to, _)| *to == drone_id){
-            *weight = pdr;
-        }
-    }
-
-    fn increment_packet_sent_counter(&mut self, drone_id: NodeId){
-        self.packets_sent_counter.entry(drone_id).and_modify(|(c, _)| *c += 1);
-
-        let pdr = self.packets_sent_counter.get(&drone_id).map_or(1., |(d, n)| *n as f64 / *d as f64);
-
-        for (_, _, weight) in self.topology_graph.all_edges_mut().filter(|(_, to, _)| *to == drone_id){
-            *weight = pdr;
-        }
-    }
-
     fn handle_nack(&mut self, packet: Packet, nack: &Nack) {
         if !self.client_is_destination(&packet) {
             self.shortcut(packet);
@@ -796,7 +826,6 @@ impl WebBrowser {
 
                 match nack.nack_type {
                     NackType::Dropped | NackType::DestinationIsDrone => {
-
                         let dest = req.server_id;
                         let new_packet = Packet::new_fragment(
                             SourceRoutingHeader::empty_route(),
@@ -804,18 +833,22 @@ impl WebBrowser {
                             fragment.clone(),
                         );
 
-                        if let Err(_) = self.try_send_packet(new_packet.clone(), dest){
+                        // update edges weight
+                        if let NackType::Dropped = nack.nack_type {
+                            if let Some(drone_id) = packet.routing_header.source() {
+                                self.increment_packet_lost_counter(drone_id);
+                            }
+                        }
+
+                        if let Err(_) = self.try_send_packet(new_packet.clone(), dest) {
                             self.packets_to_bo_sent_again.push_back((
                                 PacketId::from_u64(packet.session_id),
                                 fragment.clone(),
                             ));
                             self.start_flooding();
-                        }
-
-                        // update edges weight
-                        if let NackType::Dropped = nack.nack_type {
-                            if let Some(drone_id) = packet.routing_header.source(){
-                                self.increment_packet_lost_counter(drone_id);
+                        } else {
+                            for drone_id in &packet.routing_header.hops[1..] {
+                                self.increment_packet_sent_counter(*drone_id);
                             }
                         }
                     }
@@ -823,7 +856,14 @@ impl WebBrowser {
                     NackType::ErrorInRouting(node_to_remove)
                     | NackType::UnexpectedRecipient(node_to_remove) => {
                         // remove problematic drone and search for a new path, if found send. otherwise start a flood
-                        self.topology_graph.remove_node(node_to_remove);
+                        if self
+                            .nodes_type
+                            .get(&node_to_remove)
+                            .is_none_or(|t| *t == GraphNodeType::Drone)
+                        {
+                            self.topology_graph.remove_node(node_to_remove);
+                            self.nodes_type.remove(&node_to_remove);
+                        }
 
                         let dest = req.server_id;
                         let p = Packet::new_fragment(
@@ -942,7 +982,10 @@ impl WebBrowser {
 
                 if needed_media.is_empty() {
                     self.internal_send_to_controller(WebClientEvent::FileFromClient(
-                        TextMediaResponse::new((get_filename_from_path(&text_path), file), Vec::new()),
+                        TextMediaResponse::new(
+                            (get_filename_from_path(&text_path), file),
+                            Vec::new(),
+                        ),
                         server_id,
                     ));
                 } else {
@@ -959,50 +1002,39 @@ impl WebBrowser {
                         .insert((server_id, text_path.clone()), needed_media.clone());
 
                     let mut is_required_media_list_request = false;
-                    // store every media in stored_files as (filename, empty Vec)
 
-                    // TODO
                     // for every media:
                     // if present in cache do nothing
-                    // else, if I know the owner, do nothing (the file is arriving)
+                    // else, if I know the owner, do nothing (the file is arriving - I have already requeted it when I discovered its owner)
                     // else, if remaining list counter is set, do nothing(it's already been asked)
                     // else, set counter and ask media lists
 
                     for media_path in needed_media {
-                        // ! refactor
-
-                        if self
-                            .media_owner
-                            .get(&media_path)
-                            .is_none_or(std::option::Option::is_none)
-                        {
-                            //self.stored_files.insert(media_filename.clone(), Vec::new());
-                            self.media_owner.insert(media_path.clone(), None);
-                            self.media_request_left.insert(
-                                media_path.clone(),
-                                self.nodes_type
-                                    .iter()
-                                    .filter(|(_, t)| **t == GraphNodeType::Media)
-                                    .count() as u8,
-                            );
-                            println!(
-                                "client {} - number of media client: {}",
-                                self.id,
-                                self.nodes_type
-                                    .iter()
-                                    .filter(|(_, t)| **t == GraphNodeType::Media)
-                                    .count() as u8
-                            );
-                            is_required_media_list_request = true;
-                        } else {
-                            self.create_request(RequestType::Media(
-                                media_path.clone(),
-                                self.media_owner.get(&media_path).unwrap().unwrap(),
-                            ));
+                        if self.stored_files.contains_key(&media_path) {
+                            continue;
                         }
 
-                        println!("client {} - {:?}", self.id, self.media_owner);
-                        println!("client {} - {:?}", self.id, self.media_request_left);
+                        if self
+                            .media_file_either_owner_or_request_left
+                            .get(&media_path)
+                            .is_none()
+                        {
+                            self.media_file_either_owner_or_request_left.insert(
+                                media_path,
+                                Either::Right(
+                                    self.nodes_type
+                                        .iter()
+                                        .filter(|(_, t)| **t == GraphNodeType::Media)
+                                        .map(|(id, _)| *id)
+                                        .collect(),
+                                ),
+                            );
+                            is_required_media_list_request = true;
+                        }
+                        println!(
+                            "client {} - {:?}",
+                            self.id, self.media_file_either_owner_or_request_left
+                        );
                     }
 
                     if is_required_media_list_request {
@@ -1031,19 +1063,41 @@ impl WebBrowser {
     ) {
         match resp {
             MediaResponse::MediaList(file_list) => {
-                // TODO
-                // for every needed file, -1 to the counter
-                // for every file in the list *that is needed*, if owner not set, set it and create request
-                // else, do nothing (the file is arriving)
-                for counter in &mut self.media_request_left.values_mut() {
-                    *counter = counter.saturating_sub(1);
+                // for every needed file, remove the sender to the request left
+                for either in &mut self.media_file_either_owner_or_request_left.values_mut() {
+                    if let Either::Right(media_server_list) = either {
+                        if let Some(idx) = media_server_list.iter().position(|id| *id == server_id)
+                        {
+                            media_server_list.remove(idx);
+                            if media_server_list.is_empty() {
+                                *either = Either::Left(None);
+                            }
+                        }
+                    }
                 }
 
+                // for every file in the list *that is needed*, if owner not set, set it and create request
+                // else, do nothing (the file is arriving)
                 for media_path in file_list {
-                    if self.text_media_map.values().any(|v| v.contains(&media_path)) {
-                        self.media_owner.insert(media_path.clone(), Some(server_id));
-                        self.media_request_left.insert(media_path.clone(), 0);
-                        self.create_request(RequestType::Media(media_path, server_id));
+                    if self
+                        .text_media_map
+                        .values()
+                        .any(|v| v.contains(&media_path))
+                    {
+                        if !self
+                            .media_file_either_owner_or_request_left
+                            .get(&media_path)
+                            .is_some_and(|either| {
+                                if let Either::Left(owner) = either {
+                                    return owner.is_some();
+                                }
+                                false
+                            })
+                        {
+                            self.media_file_either_owner_or_request_left
+                                .insert(media_path.clone(), Either::Left(Some(server_id)));
+                            self.create_request(RequestType::Media(media_path, server_id));
+                        }
                     }
                 }
             }
@@ -1052,9 +1106,8 @@ impl WebBrowser {
                     println!("Response is not coherent with request, dropping request");
                     return;
                 };
-                // todo
-                // store in the cache
 
+                // store in the cache
                 self.stored_files.insert(media_path.clone(), file);
             }
         }
@@ -1096,6 +1149,7 @@ impl WebBrowser {
         }
     }
 
+    // TESTED
     fn handle_command(&mut self, command: WebClientCommand) {
         println!("Handling command {:?}", command);
         match command {
@@ -1109,6 +1163,7 @@ impl WebBrowser {
             WebClientCommand::RemoveSender(id) => {
                 self.packet_send.remove(&id);
                 self.topology_graph.remove_node(id);
+                self.nodes_type.remove(&id);
             }
 
             WebClientCommand::AskListOfFiles(server_id) => {
@@ -1127,6 +1182,7 @@ impl WebBrowser {
         }
     }
 
+    // TESTED
     fn start_flooding(&mut self) {
         self.sequential_flood_id += 1;
         println!("client {} - starting flood", self.id);
@@ -1141,12 +1197,9 @@ impl WebBrowser {
             ring.insert(self.sequential_flood_id);
         });
 
-        for channel in self.packet_send.values() {
-            println!("dc");
-            channel.send(packet.clone());
-            self.controller_send.send(WebClientEvent::PacketSent(packet.clone()));
+        for dest in &self.packet_send {
+            let _ = self.try_send_packet(packet.clone(), *dest.0);
         }
-
     }
 
     fn add_request(
@@ -1167,7 +1220,7 @@ impl WebBrowser {
         );
 
         for f in frags {
-            let p = wg_2024::packet::Packet::new_fragment(
+            let packet = wg_2024::packet::Packet::new_fragment(
                 SourceRoutingHeader::empty_route(),
                 self.packet_id_counter.get_session_id(),
                 f.clone(),
@@ -1176,12 +1229,18 @@ impl WebBrowser {
                 .waiting_for_ack
                 .insert(self.packet_id_counter.clone(), f.clone());
 
-            if let Err(_) = self.try_send_packet(p, server_id) {
-                self.packets_to_bo_sent_again
-                    .push_back((self.packet_id_counter.clone(), f));
-                self.start_flooding();
+            match self.try_send_packet(packet.clone(), server_id) {
+                Ok(packet_sent) => {
+                    for drone_id in &packet_sent.routing_header.hops[1..] {
+                        self.increment_packet_sent_counter(*drone_id);
+                    }
+                }
+                Err(_) => {
+                    self.packets_to_bo_sent_again
+                        .push_back((self.packet_id_counter.clone(), f));
+                    self.start_flooding();
+                }
             }
-
             self.packet_id_counter.increment_packet_id();
         }
 
@@ -1195,6 +1254,11 @@ impl WebBrowser {
 
         match &request_type {
             RequestType::TextList(server_id) => {
+                if !self.is_correct_server_type(*server_id, &GraphNodeType::Text) {
+                    self.internal_send_to_controller(WebClientEvent::UnsupportedRequest);
+                    return;
+                }
+
                 compression = Compression::None;
                 let frags =
                     web_messages::RequestMessage::new_text_list_request(self.id, compression.clone())
@@ -1205,6 +1269,11 @@ impl WebBrowser {
             }
 
             RequestType::MediaList(server_id) => {
+                if !self.is_correct_server_type(*server_id, &GraphNodeType::Media) {
+                    self.internal_send_to_controller(WebClientEvent::UnsupportedRequest);
+                    return;
+                }
+
                 compression = Compression::None;
                 let frags =
                     web_messages::RequestMessage::new_media_list_request(self.id, compression.clone())
