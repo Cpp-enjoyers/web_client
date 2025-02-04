@@ -13,7 +13,7 @@ use wg_2024::{
     packet::{Fragment, Packet, FRAGMENT_DSIZE},
 };
 
-use crate::{GraphNodeType, WebBrowser, DEFAULT_PDR};
+use crate::{GraphNodeType, WebBrowser};
 
 fn simulate_server_compression(before: ResponseMessage) -> Vec<Fragment> {
     let bytes = LZWCompressor::new()
@@ -28,15 +28,14 @@ fn simulate_server_compression(before: ResponseMessage) -> Vec<Fragment> {
     let mut ret = vec![];
 
     for c in chunks {
-        let data = match <[u8; FRAGMENT_DSIZE]>::try_from(c) {
-            Ok(arr) => arr,
-            Err(_) => {
-                let mut ret: [u8; FRAGMENT_DSIZE] = [0; FRAGMENT_DSIZE];
+        let data = if let Ok(arr) = <[u8; FRAGMENT_DSIZE]>::try_from(c) {
+            arr
+        } else {
+            let mut ret: [u8; FRAGMENT_DSIZE] = [0; FRAGMENT_DSIZE];
 
-                ret[..c.len()].copy_from_slice(c);
+            ret[..c.len()].copy_from_slice(c);
 
-                ret
-            }
+            ret
         };
 
         ret.push(Fragment {
@@ -89,16 +88,12 @@ fn client_from_graph_and_nodes_type(
     )
 }
 
-
-
 #[cfg(test)]
 mod web_client_tests {
     use itertools::Itertools;
-    use petgraph::Directed;
     use std::fmt::Debug;
     use std::{hash::BuildHasher, vec};
 
-    use common::Client;
     use common::{
         slc_commands::{WebClientCommand, WebClientEvent},
         web_messages::TextRequest,
@@ -138,8 +133,7 @@ mod web_client_tests {
         // true
     }
 
-
-    const complex_topology: [(u8, u8, f64); 14] = [
+    const COMPLEX_TOPOLOGY: [(u8, u8, f64); 14] = [
         (1, 11, DEFAULT_PDR),
         (11, 1, DEFAULT_PDR),
         (11, 12, DEFAULT_PDR),
@@ -157,31 +151,43 @@ mod web_client_tests {
     ];
 
     #[test]
-    pub fn prepare_packet_routing(){
+    pub fn prepare_packet_routing() {
         let (
             client,
             (_c_send, _c_recv),
             (_s_send, s_recv),
             (_c_command_send, _c_command_recv),
-            (_c_event_send, c_event_recv),
+            (_c_event_send, _c_event_recv),
         ) = client_from_graph_and_nodes_type(
-            DiGraphMap::from_edges(complex_topology),
+            DiGraphMap::from_edges(COMPLEX_TOPOLOGY),
             HashMap::from([(1, GraphNodeType::Client), (12, GraphNodeType::Drone)]),
         );
 
-        let (p, h) = client.prepare_packet_routing(Packet::new_ack(SourceRoutingHeader::empty_route(), 14, 45), 14);
-        assert_eq!(p.routing_header, SourceRoutingHeader{hop_index: 1, hops: vec![1, 11, 14]});
+        let (p, h) = client.prepare_packet_routing(
+            Packet::new_ack(SourceRoutingHeader::empty_route(), 14, 45),
+            14,
+        );
+        assert_eq!(
+            p.routing_header,
+            SourceRoutingHeader {
+                hop_index: 1,
+                hops: vec![1, 11, 14]
+            }
+        );
         let _ = h.unwrap().send(p.clone()).unwrap();
         assert_eq!(s_recv.recv().unwrap(), p);
 
-        let (_, h) = client.prepare_packet_routing(Packet::new_ack(SourceRoutingHeader::empty_route(), 14, 45), 15);
+        let (_, h) = client.prepare_packet_routing(
+            Packet::new_ack(SourceRoutingHeader::empty_route(), 14, 45),
+            15,
+        );
         assert!(h.is_none());
     }
 
     #[test]
-    pub fn is_correct_server_type(){
+    pub fn is_correct_server_type() {
         let (
-            mut client,
+            client,
             (_c_send, _c_recv),
             (_s_send, s_recv),
             (_c_command_send, _c_command_recv),
@@ -197,7 +203,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn packet_sent_counter() {
+    pub fn pdr_estimation() {
         let (
             mut client,
             (_c_send, _c_recv),
@@ -209,30 +215,34 @@ mod web_client_tests {
             HashMap::from([(1, GraphNodeType::Client)]),
         );
 
-        client.packets_sent_counter.insert(11, (0, 0));
-        client.increment_packet_sent_counter(11);
-        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(1, 0));
+        let header = SourceRoutingHeader::new(vec![1, 11, 12], 0);
+
+        client.packets_sent_counter.insert(11, (0., 0.));
+        client.update_pdr_after_ack(&header);
+        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(1., 0.));
         assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &0.);
 
-        client.increment_packet_lost_counter(11);
-        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(1, 1));
-        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &1.);
+        client.update_pdr_after_nack(&header, 11);
+        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(2., 1.));
+        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &0.5);
 
-        client.increment_packet_sent_counter(11);
-        client.increment_packet_sent_counter(11);
-        client.increment_packet_sent_counter(11);
-        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(4, 1));
+        client.update_pdr_after_ack(&header);
+        client.update_pdr_after_ack(&header);
+        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(4., 1.));
         assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &0.25);
 
-        client.increment_packet_lost_counter(11);
-        client.increment_packet_lost_counter(11);
-        client.increment_packet_lost_counter(11);
-        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(4, 4));
-        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &1.);
+        client.update_pdr_after_ack(&header);
+        client.update_pdr_after_nack(&header, 11);
+        client.update_pdr_after_nack(&header, 11);
+        client.update_pdr_after_nack(&header, 11);
+        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(8., 4.));
+        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &0.5);
 
-        client.increment_packet_lost_counter(11);
-        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(4, 4));
-        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &1.);
+        for _ in 0..8{
+            client.update_pdr_after_nack(&header, 11);
+        }
+        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(16., 12.));
+        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &0.75);
     }
 
     #[test]
@@ -240,9 +250,9 @@ mod web_client_tests {
         let (
             mut client,
             (_c_send, _c_recv),
-            (_s_send, s_recv),
+            (_s_send, _s_recv),
             (_c_command_send, _c_command_recv),
-            (_c_event_send, c_event_recv),
+            (_c_event_send, _c_event_recv),
         ) = client_from_graph_and_nodes_type(
             GraphMap::from_edges([
                 (1, 11, DEFAULT_PDR),
@@ -254,41 +264,32 @@ mod web_client_tests {
             ]),
             HashMap::from([(1, GraphNodeType::Client)]),
         );
-        client.packets_sent_counter.insert(11, (0, 0));
-        client.packets_sent_counter.insert(12, (0, 0));
 
-        client.increment_packet_sent_counter(11);
+        let header = SourceRoutingHeader::new(vec![1, 11, 12], 0);
+
+        client.packets_sent_counter.insert(11, (0., 0.));
+        client.packets_sent_counter.insert(12, (0., 0.));
+
+        client.update_pdr_after_ack(&header);
+        client.update_pdr_after_nack(&header, 11);
+        client.update_pdr_after_ack(&header);
+        client.update_pdr_after_ack(&header);
+        client.update_pdr_after_ack(&header);
+        client.update_pdr_after_nack(&header, 11);
+        client.update_pdr_after_nack(&header, 11);
+        client.update_pdr_after_nack(&header, 11);
+        client.update_pdr_after_ack(&header);
+        client.update_pdr_after_ack(&header);
+        client.update_pdr_after_ack(&header);
+        client.update_pdr_after_nack(&header, 12);
         assert_eq!(
-            client.topology_graph.edge_weight(client.id, 11).unwrap(),
-            &0.
-        );
-        client.increment_packet_lost_counter(11);
-        assert_eq!(
-            client.topology_graph.edge_weight(client.id, 11).unwrap(),
-            &1.
-        );
-        client.increment_packet_sent_counter(11);
-        client.increment_packet_sent_counter(11);
-        client.increment_packet_sent_counter(11);
-        assert_eq!(
-            client.topology_graph.edge_weight(client.id, 11).unwrap(),
-            &0.25
-        );
-        client.increment_packet_lost_counter(11);
-        client.increment_packet_lost_counter(11);
-        client.increment_packet_lost_counter(11);
-        assert_eq!(
-            client.topology_graph.edge_weight(client.id, 11).unwrap(),
-            &1.
+            *client.topology_graph.edge_weight(client.id, 11).unwrap(),
+            4. / 11.
         );
 
-        client.increment_packet_sent_counter(12);
-        client.increment_packet_sent_counter(12);
-        client.increment_packet_sent_counter(12);
-        client.increment_packet_lost_counter(12);
         assert_eq!(
             *client.topology_graph.edge_weight(client.id, 12).unwrap(),
-            1. / 3.
+            1. / 8.
         );
     }
 
@@ -297,9 +298,9 @@ mod web_client_tests {
         let (
             mut client,
             (_c_send, _c_recv),
-            (_s_send, s_recv),
+            (_s_send, _s_recv),
             (_c_command_send, _c_command_recv),
-            (_c_event_send, c_event_recv),
+            (_c_event_send, _c_event_recv),
         ) = client_from_graph_and_nodes_type(
             DiGraphMap::new(),
             HashMap::from([(1, GraphNodeType::Client)]),
@@ -379,9 +380,9 @@ mod web_client_tests {
         let (
             mut client,
             (_c_send, _c_recv),
-            (_s_send, s_recv),
+            (_s_send, _s_recv),
             (_c_command_send, _c_command_recv),
-            (_c_event_send, c_event_recv),
+            (_c_event_send, _c_event_recv),
         ) = client_from_graph_and_nodes_type(
             DiGraphMap::new(),
             HashMap::from([(1, GraphNodeType::Client)]),
@@ -389,7 +390,6 @@ mod web_client_tests {
 
         client.start_flooding();
         assert_eq!(client.sequential_flood_id, 1);
-
 
         client.handle_packet(Packet::new_flood_response(
             SourceRoutingHeader::new(vec![12, 11, 1], 2),
@@ -435,7 +435,7 @@ mod web_client_tests {
 
         assert!(graphmap_eq(
             &client.topology_graph,
-            &GraphMap::from_edges(complex_topology)
+            &GraphMap::from_edges(COMPLEX_TOPOLOGY)
         ));
 
         assert_eq!(
@@ -452,20 +452,19 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn add_neighbour() {
+    pub fn add_sender() {
         let (
             mut client,
             (_c_send, _c_recv),
-            (_s_send, s_recv),
+            (_s_send, _s_recv),
             (_c_command_send, _c_command_recv),
-            (_c_event_send, c_event_recv),
+            (_c_event_send, _c_event_recv),
         ) = client_from_graph_and_nodes_type(
             DiGraphMap::new(),
             HashMap::from([(1, GraphNodeType::Client)]),
         );
 
         let (d_send, d_recv) = unbounded();
-
 
         client.handle_command(WebClientCommand::AddSender(11, d_send.clone()));
 
@@ -477,6 +476,33 @@ mod web_client_tests {
                 FloodRequest::initialize(1, 1, NodeType::Client)
             )
         );
+    }
+
+    #[test]
+    pub fn remove_sender() {
+        let (
+            mut client,
+            (_c_send, _c_recv),
+            (_s_send, _s_recv),
+            (_c_command_send, _c_command_recv),
+            (_c_event_send, _c_event_recv),
+        ) = client_from_graph_and_nodes_type(
+            DiGraphMap::from_edges([(1, 11, DEFAULT_PDR), (11, 1, DEFAULT_PDR)]),
+            HashMap::from([(1, GraphNodeType::Client), (11, GraphNodeType::Drone)]),
+        );
+
+        assert_eq!(client.packets_sent_counter, HashMap::from([(11, (0., 0.))]));
+
+        client.handle_command(WebClientCommand::RemoveSender(11));
+
+        assert_eq!(client.topology_graph.edge_count(), 0);
+        assert!(client.topology_graph.contains_node(1));
+        assert!(!client.topology_graph.contains_node(11));
+        assert_eq!(
+            client.nodes_type,
+            HashMap::from([(1, GraphNodeType::Client)])
+        );
+        assert_eq!(client.packets_sent_counter, HashMap::new());
     }
 
     #[test]
@@ -505,7 +531,7 @@ mod web_client_tests {
         client.handle_command(WebClientCommand::AskListOfFiles(21));
         // receive request
         let req = s_recv.recv().unwrap();
-        println!("--{:?}", req);
+        //println!("--{:?}", req);
         let mut data = Vec::new();
         match req.pack_type {
             PacketType::MsgFragment(f) => data.push(f),
@@ -583,10 +609,10 @@ mod web_client_tests {
 
         let (
             mut client,
-            (c_send, c_recv),
-            (s_send, s_recv),
-            (c_command_send, c_command_recv),
-            (c_event_send, c_event_recv),
+            (_, _),
+            (_s_send, s_recv),
+            (_, _),
+            (_c_event_send, c_event_recv),
         ) = client_from_graph_and_nodes_type(
             GraphMap::from_edges([
                 (1, 11, DEFAULT_PDR),
@@ -604,7 +630,7 @@ mod web_client_tests {
 
         // receive request
         let req = s_recv.recv().unwrap();
-        println!("{:?}", req);
+        //println!("{:?}", req);
         let mut data = Vec::new();
         match req.pack_type {
             PacketType::MsgFragment(f) => data.push(f),
@@ -721,10 +747,10 @@ mod web_client_tests {
 
         let (
             mut client,
-            (c_send, c_recv),
-            (s_send, s_recv),
-            (c_command_send, c_command_recv),
-            (c_event_send, c_event_recv),
+            (_, _),
+            (_s_send, s_recv),
+            (_, _),
+            (_c_event_send, c_event_recv),
         ) = client_from_graph_and_nodes_type(
             GraphMap::from_edges([
                 (1, 11, DEFAULT_PDR),
@@ -811,7 +837,6 @@ mod web_client_tests {
             },
         );
         client.handle_packet(nack);
-
         assert_eq!(client.topology_graph.edge_count(), 0);
         assert_eq!(client.topology_graph.node_count(), 2);
         // remove flood request (the node 11 has been removed -> disconnected graph)
@@ -921,10 +946,10 @@ mod web_client_tests {
 
         let (
             mut client,
-            (c_send, c_recv),
-            (s_send, s_recv),
-            (c_command_send, c_command_recv),
-            (c_event_send, c_event_recv),
+            (_, _),
+            (_s_send, s_recv),
+            (_, _),
+            (_c_event_send, c_event_recv),
         ) = client_from_graph_and_nodes_type(
             GraphMap::from_edges([
                 (1, 11, DEFAULT_PDR),
@@ -942,7 +967,7 @@ mod web_client_tests {
 
         // receive request
         let req = s_recv.recv().unwrap();
-        println!("{:?}", req);
+        //println!("{:?}", req);
         let mut data = Vec::new();
         match req.pack_type {
             PacketType::MsgFragment(f) => data.push(f),
@@ -1021,10 +1046,10 @@ mod web_client_tests {
     pub fn file_request_no_media() {
         let (
             mut client,
-            (c_send, c_recv),
-            (s_send, s_recv),
-            (c_command_send, c_command_recv),
-            (c_event_send, c_event_recv),
+            (_, _),
+            (_, _),
+            (_, _),
+            (_c_event_send, c_event_recv),
         ) = client_from_graph_and_nodes_type(
             GraphMap::from_edges([
                 (1, 11, DEFAULT_PDR),
@@ -1078,10 +1103,10 @@ mod web_client_tests {
     pub fn file_request_one_media() {
         let (
             mut client,
-            (c_send, c_recv),
-            (s_send, s_recv),
-            (c_command_send, c_command_recv),
-            (c_event_send, c_event_recv),
+            (_, _),
+            (_s_send, s_recv),
+            (_, _),
+            (_c_event_send, c_event_recv),
         ) = client_from_graph_and_nodes_type(
             GraphMap::from_edges([
                 (1, 11, DEFAULT_PDR),
@@ -1262,10 +1287,10 @@ mod web_client_tests {
     pub fn file_request_three_media_third_unavailable() {
         let (
             mut client,
-            (c_send, c_recv),
-            (s_send, s_recv),
-            (c_command_send, c_command_recv),
-            (c_event_send, c_event_recv),
+            (_, _),
+            (_s_send, s_recv),
+            (_, _),
+            (_c_event_send, c_event_recv),
         ) = client_from_graph_and_nodes_type(
             GraphMap::from_edges([
                 (1, 11, DEFAULT_PDR),
@@ -1496,10 +1521,10 @@ mod web_client_tests {
     pub fn try_resend_packet_successfully() {
         let (
             mut client,
-            (c_send, c_recv),
-            (s_send, s_recv),
-            (c_command_send, c_command_recv),
-            (c_event_send, c_event_recv),
+            (_, _),
+            (_s_send, s_recv),
+            (_, _),
+            (_, _),
         ) = client_from_graph_and_nodes_type(
             GraphMap::from_edges([
                 (1, 11, DEFAULT_PDR),
@@ -1547,10 +1572,10 @@ mod web_client_tests {
     pub fn try_resend_packet_unsuccessfully() {
         let (
             mut client,
-            (c_send, c_recv),
-            (s_send, s_recv),
-            (c_command_send, c_command_recv),
-            (c_event_send, c_event_recv),
+            (_, _),
+            (_, _),
+            (_, _),
+            (_, _),
         ) = client_from_graph_and_nodes_type(
             GraphMap::from_edges([
                 (1, 11, DEFAULT_PDR),
@@ -1592,11 +1617,11 @@ mod web_client_tests {
     #[test]
     pub fn internal_send_to_controller() {
         let (
-            mut client,
-            (c_send, c_recv),
-            (s_send, s_recv),
-            (c_command_send, c_command_recv),
-            (c_event_send, c_event_recv),
+            client,
+            (_, _),
+            (_, _),
+            (_, _),
+            (_c_event_send, c_event_recv),
         ) = client_from_graph_and_nodes_type(
             GraphMap::from_edges([
                 (1, 11, DEFAULT_PDR),
@@ -1620,11 +1645,11 @@ mod web_client_tests {
     #[test]
     pub fn shortcut_successfully() {
         let (
-            mut client,
-            (c_send, c_recv),
-            (s_send, s_recv),
-            (c_command_send, c_command_recv),
-            (c_event_send, c_event_recv),
+            client,
+            (_, _),
+            (_, _),
+            (_, _),
+            (_c_event_send, c_event_recv),
         ) = client_from_graph_and_nodes_type(
             GraphMap::from_edges([
                 (1, 11, DEFAULT_PDR),
@@ -1647,11 +1672,11 @@ mod web_client_tests {
     #[test]
     pub fn shortcut_unsuccessfully() {
         let (
-            mut client,
-            (c_send, c_recv),
-            (s_send, s_recv),
-            (c_command_send, c_command_recv),
-            (c_event_send, c_event_recv),
+            client,
+            (_, _),
+            (_, _),
+            (_, _),
+            (_c_event_send, c_event_recv),
         ) = client_from_graph_and_nodes_type(
             GraphMap::from_edges([
                 (1, 11, DEFAULT_PDR),
@@ -1674,9 +1699,7 @@ mod web_client_tests {
 
 #[cfg(test)]
 mod fragmentation_tests {
-    use common::web_messages::{Compression, RequestMessage, ResponseMessage, Serializable};
-    use compression::{lzw::LZWCompressor, Compressor};
-    use wg_2024::packet::{Fragment, FRAGMENT_DSIZE};
+    use common::web_messages::{Compression, RequestMessage, ResponseMessage};
 
     use crate::{web_client_test::simulate_server_compression, Fragmentable};
 
