@@ -1,59 +1,35 @@
-const REQ_ID_MASK: u64 = 0xFFFF;
-const PACKET_ID_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
-
-const _PACKET_ID_LEN: u8 = 48;
-const REQ_ID_LEN: u8 = 16;
-
-pub type SessionId = u64;
-pub type RequestId = u16;
-
-#[derive(Debug, Hash, Clone, PartialEq, Eq)]
-
-pub struct PacketId {
-    packet_id: SessionId, // only 48 LSB used
-    req_id: RequestId,
-}
-impl PacketId {
-    pub fn new() -> Self {
-        Self {
-            packet_id: 0,
-            req_id: 0,
-        }
-    }
-
-    pub fn from_u64(n: u64) -> Self {
-        Self {
-            packet_id: n >> REQ_ID_LEN,
-            req_id: (n & REQ_ID_MASK) as u16,
-        }
-    }
-
-    pub fn get_packet_id(&self) -> u64 {
-        self.packet_id
-    }
-
-    pub fn get_request_id(&self) -> u16 {
-        self.req_id
-    }
-
-    pub fn get_session_id(&self) -> u64 {
-        (self.packet_id << REQ_ID_LEN) | u64::from(self.req_id)
-    }
-
-    pub fn increment_packet_id(&mut self) {
-        self.packet_id += 1;
-        self.packet_id &= PACKET_ID_MASK;
-    }
-
-    pub fn increment_request_id(&mut self) {
-        self.packet_id = 0; // new request has to reset the session id
-        self.req_id = self.req_id.wrapping_add(1);
-    }
-}
-
 #[cfg(test)]
-mod packet_id_test {
-    use super::PacketId;
+mod utils_test {
+    use crate::utils::{get_filename_from_path, get_media_inside_html_file, PacketId};
+
+
+
+    #[test]
+    pub fn filename_from_path() {
+        let path = "a/b/c/d/e/ciao.txt".to_string();
+        assert_eq!(get_filename_from_path(&path), "ciao.txt".to_string());
+
+        let path = "ciao.txt".to_string();
+        assert_eq!(get_filename_from_path(&path), "ciao.txt".to_string());
+    }
+
+    #[test]
+    fn file_parsing() {
+        assert_eq!(
+            get_media_inside_html_file(&"suhbefuiwfbwob".to_string()),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            get_media_inside_html_file(&"-----------<img src=\"youtube.com\"\\>".to_string()),
+            vec!["youtube.com".to_string()]
+        );
+        assert_eq!(
+            get_media_inside_html_file(
+                &"-----------<img src=\"/usr/tmp/folder/subfolder/pic.jpg\"\\>".to_string()
+            ),
+            vec!["/usr/tmp/folder/subfolder/pic.jpg".to_string()]
+        );
+    }
 
     #[test]
     fn test_from_64() {

@@ -1,19 +1,6 @@
-use std::collections::HashMap;
-
-use common::{
-    slc_commands::{WebClientCommand, WebClientEvent},
-    web_messages::{ResponseMessage, Serializable},
-    Client,
-};
+use common::web_messages::{ResponseMessage, Serializable};
 use compression::{lzw::LZWCompressor, Compressor};
-use crossbeam_channel::{unbounded, Receiver, Sender};
-use petgraph::{prelude::GraphMap, Directed};
-use wg_2024::{
-    network::NodeId,
-    packet::{Fragment, Packet, FRAGMENT_DSIZE},
-};
-
-use crate::{GraphNodeType, WebBrowser};
+use wg_2024::packet::{Fragment, FRAGMENT_DSIZE};
 
 fn simulate_server_compression(before: ResponseMessage) -> Vec<Fragment> {
     let bytes = LZWCompressor::new()
@@ -48,110 +35,30 @@ fn simulate_server_compression(before: ResponseMessage) -> Vec<Fragment> {
     ret
 }
 
-fn client_with_graph_and_nodes_type(
-    graph: GraphMap<NodeId, f64, Directed>,
-    nodes_type: HashMap<NodeId, GraphNodeType>,
-) -> (
-    WebBrowser,
-    (Sender<Packet>, Receiver<Packet>),
-    (Sender<Packet>, Receiver<Packet>),
-    (Sender<WebClientCommand>, Receiver<WebClientCommand>),
-    (Sender<WebClientEvent>, Receiver<WebClientEvent>),
-) {
-    // Client 1 channels
-    let (c_send, c_recv) = unbounded();
-
-    let (c_event_send, c_event_recv) = unbounded();
-    let (c_command_send, c_command_recv) = unbounded();
-    // neighbor
-    let (s_send, s_recv) = unbounded();
-
-    // client 1
-    let neighbours1 = HashMap::from([(11, s_send.clone())]);
-    let mut client = WebBrowser::new(
-        1,
-        c_event_send.clone(),
-        c_command_recv.clone(),
-        c_recv.clone(),
-        neighbours1,
-    );
-
-    client.topology_graph = graph;
-    client.nodes_type = nodes_type;
-
-    (
-        client,
-        (c_send, c_recv),
-        (s_send, s_recv),
-        (c_command_send, c_command_recv),
-        (c_event_send, c_event_recv),
-    )
-}
-
 #[cfg(test)]
 mod web_client_tests {
-    use itertools::Itertools;
-    use std::fmt::Debug;
-    use std::{hash::BuildHasher, vec};
+    use common::{slc_commands::{ServerType, TextMediaResponse}, web_messages::{self, Compression, GenericResponse, MediaResponse, RequestMessage, ResponseMessage, TextResponse}};
+    use itertools::Either;
+    use wg_2024::{network::SourceRoutingHeader, packet::{Ack, FloodRequest, Fragment, Nack, NackType, NodeType, Packet, PacketType}};
+    use std::collections::{HashMap, VecDeque};
+    use std::vec;
 
     use common::{
         slc_commands::{WebClientCommand, WebClientEvent},
         web_messages::TextRequest,
     };
     use crossbeam_channel::{unbounded, TryRecvError};
-    use petgraph::prelude::GraphMap;
+    use petgraph::prelude::{DiGraphMap, GraphMap};
 
-    use crate::web_client_test::client_with_graph_and_nodes_type;
-    use crate::{web_client_test::simulate_server_compression, *};
-
-    /// compares two graphmaps
-    fn graphmap_eq<N: Debug, E: Debug, Ty, Ix>(
-        a: &GraphMap<N, E, Ty, Ix>,
-        b: &GraphMap<N, E, Ty, Ix>,
-    ) -> bool
-    where
-        N: PartialEq + PartialOrd + std::hash::Hash + Ord + Copy,
-        E: PartialEq + Copy + PartialOrd,
-        Ty: petgraph::EdgeType,
-        Ix: BuildHasher,
-    {
-        // let a_ns = a.nodes();
-        // let b_ns = b.nodes();
-        let a_es = a.all_edges().map(|e| (e.0, e.1, *e.2));
-        let b_es = b.all_edges().map(|e| ((e.0, e.1, *e.2)));
-        a_es.sorted_by(|a, b| a.partial_cmp(b).unwrap())
-            .eq(b_es.sorted_by(|a, b| a.partial_cmp(b).unwrap()))
-
-        // for (a, b, c) in a_es.sorted_by(|a, b| a.partial_cmp(b).unwrap()) {
-        //     print!("{a:?}, {b:?}, {c:?} - ");
-        // }
-        // println!("\n---");
-        // for (a, b, c) in b_es.sorted_by(|a, b| a.partial_cmp(b).unwrap()) {
-        //     print!("{a:?}, {b:?}, {c:?} - ");
-        // }
-        // println!("\n-----");
-        // true
-    }
-
-    const COMPLEX_TOPOLOGY: [(u8, u8, f64); 14] = [
-        (1, 11, DEFAULT_PDR),
-        (11, 1, DEFAULT_PDR),
-        (11, 12, DEFAULT_PDR),
-        (12, 11, DEFAULT_PDR),
-        (13, 11, DEFAULT_PDR),
-        (11, 13, DEFAULT_PDR),
-        (14, 11, DEFAULT_PDR),
-        (11, 14, DEFAULT_PDR),
-        (13, 14, DEFAULT_PDR),
-        (14, 13, DEFAULT_PDR),
-        (1, 12, DEFAULT_PDR),
-        (12, 1, DEFAULT_PDR),
-        (13, 2, DEFAULT_PDR),
-        (14, 2, DEFAULT_PDR),
-    ];
+    use crate::{utils::PacketId, web_client::{test::simulate_server_compression, test_utils::{client_with_graph_and_nodes_type, COMPLEX_TOPOLOGY}, Fragmentable, GraphNodeType, RequestType, WebBrowserRequest, DEFAULT_PDR}};
 
     #[test]
     pub fn handle_ack() {
+        unimplemented!()
+    }
+
+    #[test]
+    pub fn handle_nack() {
         unimplemented!()
     }
 
@@ -167,8 +74,8 @@ mod web_client_tests {
             DiGraphMap::new(),
             HashMap::from([
                 (1, GraphNodeType::Client),
-                (22, GraphNodeType::Text),
-                (2, GraphNodeType::Media),
+                (22, GraphNodeType::TextServer),
+                (2, GraphNodeType::MediaServer),
                 (3, GraphNodeType::Server),
             ]),
         );
@@ -223,8 +130,8 @@ mod web_client_tests {
             DiGraphMap::new(),
             HashMap::from([
                 (1, GraphNodeType::Client),
-                (22, GraphNodeType::Text),
-                (2, GraphNodeType::Media),
+                (22, GraphNodeType::TextServer),
+                (2, GraphNodeType::MediaServer),
             ]),
         );
 
@@ -281,8 +188,8 @@ mod web_client_tests {
             DiGraphMap::new(),
             HashMap::from([
                 (1, GraphNodeType::Client),
-                (22, GraphNodeType::Text),
-                (2, GraphNodeType::Media),
+                (22, GraphNodeType::TextServer),
+                (2, GraphNodeType::MediaServer),
             ]),
         );
 
@@ -358,7 +265,7 @@ mod web_client_tests {
             RequestType::ServersType,
             &GenericResponse::Type(ServerType::MediaServer),
         );
-        assert_eq!(client.nodes_type.get(&2), Some(&GraphNodeType::Media));
+        assert_eq!(client.nodes_type.get(&2), Some(&GraphNodeType::MediaServer));
         assert_eq!(
             c_event_recv.recv().unwrap(),
             WebClientEvent::ServersTypes(HashMap::from([(2, ServerType::MediaServer)]))
@@ -506,7 +413,7 @@ mod web_client_tests {
         );
 
         assert!(client.is_correct_server_type(1, &GraphNodeType::Client));
-        assert!(!client.is_correct_server_type(12, &GraphNodeType::Text));
+        assert!(!client.is_correct_server_type(12, &GraphNodeType::TextServer));
         assert!(!client.is_correct_server_type(123, &GraphNodeType::Client));
     }
 
@@ -602,164 +509,6 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn start_flooding_simple_top() {
-        let (
-            mut client,
-            (_c_send, _c_recv),
-            (_s_send, _s_recv),
-            (_c_command_send, _c_command_recv),
-            (_c_event_send, _c_event_recv),
-        ) = client_with_graph_and_nodes_type(
-            DiGraphMap::new(),
-            HashMap::from([(1, GraphNodeType::Client)]),
-        );
-
-        client.start_flooding();
-        assert_eq!(client.sequential_flood_id, 1);
-
-        client.handle_packet(Packet::new_flood_response(
-            SourceRoutingHeader::new(vec![12, 11, 1], 2),
-            0,
-            FloodResponse {
-                path_trace: vec![
-                    (1, NodeType::Client),
-                    (11, NodeType::Drone),
-                    (12, NodeType::Drone),
-                ],
-                flood_id: 1,
-            },
-        ));
-        client.handle_packet(Packet::new_flood_response(
-            SourceRoutingHeader::new(vec![12, 11, 1], 2),
-            0,
-            FloodResponse {
-                path_trace: vec![
-                    (1, NodeType::Client),
-                    (11, NodeType::Drone),
-                    (13, NodeType::Drone),
-                ],
-                flood_id: 1,
-            },
-        ));
-        client.handle_packet(Packet::new_flood_response(
-            SourceRoutingHeader::new(vec![12, 11, 1], 2),
-            0,
-            FloodResponse {
-                path_trace: vec![
-                    (1, NodeType::Client),
-                    (11, NodeType::Drone),
-                    (14, NodeType::Drone),
-                    (13, NodeType::Drone),
-                ],
-                flood_id: 1,
-            },
-        ));
-
-        assert!(graphmap_eq(
-            &client.topology_graph,
-            &GraphMap::from_edges([
-                (1, 11, DEFAULT_PDR),
-                (11, 1, DEFAULT_PDR),
-                (11, 12, DEFAULT_PDR),
-                (12, 11, DEFAULT_PDR),
-                (13, 11, DEFAULT_PDR),
-                (11, 13, DEFAULT_PDR),
-                (14, 11, DEFAULT_PDR),
-                (11, 14, DEFAULT_PDR),
-                (13, 14, DEFAULT_PDR),
-                (14, 13, DEFAULT_PDR)
-            ])
-        ));
-
-        assert_eq!(
-            client.nodes_type,
-            HashMap::from([
-                (1, GraphNodeType::Client),
-                (11, GraphNodeType::Drone),
-                (12, GraphNodeType::Drone),
-                (13, GraphNodeType::Drone),
-                (14, GraphNodeType::Drone)
-            ])
-        )
-    }
-
-    #[test]
-    pub fn start_flooding_complex_top() {
-        let (
-            mut client,
-            (_c_send, _c_recv),
-            (_s_send, _s_recv),
-            (_c_command_send, _c_command_recv),
-            (_c_event_send, _c_event_recv),
-        ) = client_with_graph_and_nodes_type(
-            DiGraphMap::new(),
-            HashMap::from([(1, GraphNodeType::Client)]),
-        );
-
-        client.start_flooding();
-        assert_eq!(client.sequential_flood_id, 1);
-
-        client.handle_packet(Packet::new_flood_response(
-            SourceRoutingHeader::new(vec![12, 11, 1], 2),
-            0,
-            FloodResponse {
-                path_trace: vec![
-                    (1, NodeType::Client),
-                    (12, NodeType::Drone),
-                    (11, NodeType::Drone),
-                ],
-                flood_id: 1,
-            },
-        ));
-
-        client.handle_packet(Packet::new_flood_response(
-            SourceRoutingHeader::new(vec![12, 11, 1], 2),
-            0,
-            FloodResponse {
-                path_trace: vec![
-                    (1, NodeType::Client),
-                    (11, NodeType::Drone),
-                    (13, NodeType::Drone),
-                    (2, NodeType::Client),
-                    (14, NodeType::Drone),
-                ],
-                flood_id: 1,
-            },
-        ));
-
-        client.handle_packet(Packet::new_flood_response(
-            SourceRoutingHeader::new(vec![12, 11, 1], 2),
-            0,
-            FloodResponse {
-                path_trace: vec![
-                    (1, NodeType::Client),
-                    (11, NodeType::Drone),
-                    (14, NodeType::Drone),
-                    (13, NodeType::Drone),
-                ],
-                flood_id: 1,
-            },
-        ));
-
-        assert!(graphmap_eq(
-            &client.topology_graph,
-            &GraphMap::from_edges(COMPLEX_TOPOLOGY)
-        ));
-
-        assert_eq!(
-            client.nodes_type,
-            HashMap::from([
-                (1, GraphNodeType::Client),
-                (11, GraphNodeType::Drone),
-                (12, GraphNodeType::Drone),
-                (13, GraphNodeType::Drone),
-                (14, GraphNodeType::Drone),
-                (2, GraphNodeType::Client)
-            ])
-        )
-    }
-
-    #[test]
     pub fn add_sender() {
         let (
             mut client,
@@ -832,7 +581,7 @@ mod web_client_tests {
             HashMap::from([
                 (1, GraphNodeType::Client),
                 (11, GraphNodeType::Drone),
-                (21, GraphNodeType::Text),
+                (21, GraphNodeType::TextServer),
             ]),
         );
 
@@ -925,7 +674,7 @@ mod web_client_tests {
                 HashMap::from([
                     (1, GraphNodeType::Client),
                     (11, GraphNodeType::Drone),
-                    (21, GraphNodeType::Text),
+                    (21, GraphNodeType::TextServer),
                 ]),
             );
 
@@ -1058,7 +807,7 @@ mod web_client_tests {
                 HashMap::from([
                     (1, GraphNodeType::Client),
                     (11, GraphNodeType::Drone),
-                    (21, GraphNodeType::Text),
+                    (21, GraphNodeType::TextServer),
                 ]),
             );
 
@@ -1151,7 +900,7 @@ mod web_client_tests {
         client.nodes_type = HashMap::from([
             (1, GraphNodeType::Client),
             (11, GraphNodeType::Drone),
-            (21, GraphNodeType::Text),
+            (21, GraphNodeType::TextServer),
         ]);
 
         client.try_resend_packet();
@@ -1399,7 +1148,7 @@ mod web_client_tests {
                 HashMap::from([
                     (1, GraphNodeType::Client),
                     (11, GraphNodeType::Drone),
-                    (21, GraphNodeType::Media),
+                    (21, GraphNodeType::MediaServer),
                 ]),
             );
         client.packet_id_counter = PacketId::from_u64(1);
@@ -1578,7 +1327,7 @@ mod web_client_tests {
                 HashMap::from([
                     (1, GraphNodeType::Client),
                     (11, GraphNodeType::Drone),
-                    (21, GraphNodeType::Media),
+                    (21, GraphNodeType::MediaServer),
                 ]),
             );
         client.packet_id_counter = PacketId::from_u64(1);
@@ -1807,7 +1556,7 @@ mod web_client_tests {
                 HashMap::from([
                     (1, GraphNodeType::Client),
                     (11, GraphNodeType::Drone),
-                    (21, GraphNodeType::Media),
+                    (21, GraphNodeType::MediaServer),
                 ]),
             );
 
@@ -1852,7 +1601,7 @@ mod web_client_tests {
             HashMap::from([
                 (1, GraphNodeType::Client),
                 (11, GraphNodeType::Drone),
-                (21, GraphNodeType::Media),
+                (21, GraphNodeType::MediaServer),
             ]),
         );
 
@@ -1893,7 +1642,7 @@ mod web_client_tests {
                 HashMap::from([
                     (1, GraphNodeType::Client),
                     (11, GraphNodeType::Drone),
-                    (21, GraphNodeType::Media),
+                    (21, GraphNodeType::MediaServer),
                 ]),
             );
 
@@ -1916,7 +1665,7 @@ mod web_client_tests {
                 HashMap::from([
                     (1, GraphNodeType::Client),
                     (11, GraphNodeType::Drone),
-                    (21, GraphNodeType::Media),
+                    (21, GraphNodeType::MediaServer),
                 ]),
             );
 
@@ -1938,7 +1687,7 @@ mod web_client_tests {
                 HashMap::from([
                     (1, GraphNodeType::Client),
                     (11, GraphNodeType::Drone),
-                    (21, GraphNodeType::Media),
+                    (21, GraphNodeType::MediaServer),
                 ]),
             );
 
@@ -1953,7 +1702,7 @@ mod web_client_tests {
 mod fragmentation_tests {
     use common::web_messages::{Compression, RequestMessage, ResponseMessage};
 
-    use crate::{web_client_test::simulate_server_compression, Fragmentable};
+    use crate::web_client::{test::simulate_server_compression, Fragmentable};
 
     #[test]
     fn invalid_request_response() {
