@@ -5,7 +5,7 @@ mod flood_test{
     use petgraph::prelude::{DiGraphMap, GraphMap};
     use wg_2024::{network::SourceRoutingHeader, packet::{FloodResponse, NodeType, Packet}};
 
-    use crate::web_client::{test_utils::{client_with_graph_and_nodes_type, COMPLEX_TOPOLOGY}, GraphNodeType, DEFAULT_PDR};
+    use crate::web_client::{utils_for_test::{client_with_graph_and_nodes_type, COMPLEX_TOPOLOGY}, GraphNodeType, DEFAULT_WEIGHT};
 
     /// compares two graphmaps
 fn graphmap_eq<N: Debug, E: Debug, Ty, Ix>(
@@ -94,16 +94,16 @@ where
         assert!(graphmap_eq(
             &client.topology_graph,
             &GraphMap::from_edges([
-                (1, 11, DEFAULT_PDR),
-                (11, 1, DEFAULT_PDR),
-                (11, 12, DEFAULT_PDR),
-                (12, 11, DEFAULT_PDR),
-                (13, 11, DEFAULT_PDR),
-                (11, 13, DEFAULT_PDR),
-                (14, 11, DEFAULT_PDR),
-                (11, 14, DEFAULT_PDR),
-                (13, 14, DEFAULT_PDR),
-                (14, 13, DEFAULT_PDR)
+                (1, 11, DEFAULT_WEIGHT),
+                (11, 1, DEFAULT_WEIGHT),
+                (11, 12, DEFAULT_WEIGHT),
+                (12, 11, DEFAULT_WEIGHT),
+                (13, 11, DEFAULT_WEIGHT),
+                (11, 13, DEFAULT_WEIGHT),
+                (14, 11, DEFAULT_WEIGHT),
+                (11, 14, DEFAULT_WEIGHT),
+                (13, 14, DEFAULT_WEIGHT),
+                (14, 13, DEFAULT_WEIGHT)
             ])
         ));
 

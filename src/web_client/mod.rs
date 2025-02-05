@@ -33,9 +33,9 @@ mod flooding;
 #[cfg(test)]
 mod test;
 #[cfg(test)]
-mod test_utils;
+mod utils_for_test;
 
-const DEFAULT_PDR: f64 = 0.5;
+const DEFAULT_WEIGHT: f64 = 0.5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GraphNodeType {
@@ -276,8 +276,8 @@ impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
         let mut initial_edges = vec![];
         let mut packets_sent_counter = HashMap::new();
         for node in packet_send.keys() {
-            initial_edges.push((id, *node, DEFAULT_PDR));
-            initial_edges.push((*node, id, DEFAULT_PDR));
+            initial_edges.push((id, *node, DEFAULT_WEIGHT));
+            initial_edges.push((*node, id, DEFAULT_WEIGHT));
 
             packets_sent_counter.insert(*node, (0., 0.));
         }
@@ -332,7 +332,7 @@ impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
 }
 
 impl WebBrowser {
-    // ! separate tests in more files, unit vs integration tests, logs
+    // ! unit vs integration tests, logs
 
     // TESTED
     fn internal_send_to_controller(&self, msg: WebClientEvent) {
@@ -355,11 +355,11 @@ impl WebBrowser {
                     frag.clone(),
                 );
 
-                match self.try_send_packet(packet.clone(), req.server_id) {
+                match self.try_send_packet(packet, req.server_id) {
                     Ok(packet_sent) => {
                         self.routing_header_history.insert(
-                            PacketId::from_u64(packet.session_id),
-                            packet.routing_header.clone(),
+                            PacketId::from_u64(packet_sent.session_id),
+                            packet_sent.routing_header.clone(),
                         );
                     }
 
@@ -590,22 +590,24 @@ impl WebBrowser {
         }
     }
 
-    fn update_graph_pdr(&mut self, drone_id: NodeId) {
-        let pdr = self
+    // TESTED
+    fn update_graph_weight(&mut self, drone_id: NodeId) {
+        let new_weight = self
             .packets_sent_counter
             .get(&drone_id)
-            .map_or(1., |(d, n)| *n / *d);
+            .map_or(1., |(d, n)| 1. / (1. - (*n / *d)));
 
         for (_, _, weight) in self
             .topology_graph
             .all_edges_mut()
             .filter(|(_, to, _)| *to == drone_id)
         {
-            *weight = pdr;
+            *weight = new_weight;
         }
     }
 
-    fn update_pdr_after_nack(&mut self, header: &SourceRoutingHeader, problematic_node: NodeId) {
+    // TESTED
+    fn update_packet_counter_after_nack(&mut self, header: &SourceRoutingHeader, problematic_node: NodeId) {
         for id in &header.hops {
             if *id == problematic_node {
                 break;
@@ -623,18 +625,20 @@ impl WebBrowser {
                 *lost += 1.;
             });
 
-        self.update_graph_pdr(problematic_node);
+        self.update_graph_weight(problematic_node);
     }
 
-    fn update_pdr_after_ack(&mut self, header: &SourceRoutingHeader) {
+    // TESTED
+    fn update_packet_counter_after_ack(&mut self, header: &SourceRoutingHeader) {
         for drone_id in &header.hops {
             self.packets_sent_counter
                 .entry(*drone_id)
                 .and_modify(|(sent, _)| *sent += 1.);
 
-            self.update_graph_pdr(*drone_id);
+            self.update_graph_weight(*drone_id);
         }
     }
+
     // TESTED
     fn handle_flood_response(&mut self, packet: Packet, resp: &FloodResponse) {
         let initiator: Option<&(NodeId, NodeType)> = resp.path_trace.first();
@@ -659,21 +663,21 @@ impl WebBrowser {
             for (id, node_type) in &resp.path_trace {
                 if let Some((from_id, from_type)) = prev {
                     if *id == self.id || from_id == self.id {
-                        self.add_new_edge(from_id, *id, DEFAULT_PDR);
-                        self.add_new_edge(*id, from_id, DEFAULT_PDR);
+                        self.add_new_edge(from_id, *id, DEFAULT_WEIGHT);
+                        self.add_new_edge(*id, from_id, DEFAULT_WEIGHT);
                     } else {
                         // this prevents A* to find path with client/server in the middle
                         if matches!(from_type, NodeType::Client)
                             | matches!(from_type, NodeType::Server)
                         {
-                            self.add_new_edge(*id, from_id, DEFAULT_PDR);
+                            self.add_new_edge(*id, from_id, DEFAULT_WEIGHT);
                         } else if matches!(node_type, NodeType::Client)
                             | matches!(node_type, NodeType::Server)
                         {
-                            self.add_new_edge(from_id, *id, DEFAULT_PDR);
+                            self.add_new_edge(from_id, *id, DEFAULT_WEIGHT);
                         } else {
-                            self.add_new_edge(from_id, *id, DEFAULT_PDR);
-                            self.add_new_edge(*id, from_id, DEFAULT_PDR);
+                            self.add_new_edge(from_id, *id, DEFAULT_WEIGHT);
+                            self.add_new_edge(*id, from_id, DEFAULT_WEIGHT);
                         }
                     }
 
@@ -721,7 +725,7 @@ impl WebBrowser {
                 let packet_id = PacketId::from_u64(packet.session_id);
                 if req.waiting_for_ack.remove(&packet_id).is_some() {
                     if let Some(header) = self.routing_header_history.remove(&packet_id) {
-                        self.update_pdr_after_ack(&header);
+                        self.update_packet_counter_after_ack(&header);
                     }
                 } else {
                     println!("client {} - I received an ack {:?} for a packet that has already been acknowledged, bug for me or for the sender", self.id, ack);
@@ -810,6 +814,10 @@ impl WebBrowser {
                     return;
                 };
 
+                let original_header = self
+                    .routing_header_history
+                    .remove(&PacketId::from_u64(packet.session_id));
+
                 match nack.nack_type {
                     NackType::Dropped | NackType::DestinationIsDrone => {
                         let dest = req.server_id;
@@ -821,12 +829,9 @@ impl WebBrowser {
 
                         // update edges weight
                         if let NackType::Dropped = nack.nack_type {
-                            if let Some(header) = self
-                                .routing_header_history
-                                .remove(&PacketId::from_u64(packet.session_id))
-                            {
+                            if let Some(header) = original_header{
                                 if let Some(source) = packet.routing_header.source() {
-                                    self.update_pdr_after_nack(&header, source);
+                                    self.update_packet_counter_after_nack(&header, source);
                                 }
                             }
                         }
@@ -1138,8 +1143,8 @@ impl WebBrowser {
         match command {
             WebClientCommand::AddSender(id, sender) => {
                 self.packet_send.insert(id, sender);
-                self.add_new_edge(self.id, id, DEFAULT_PDR);
-                self.add_new_edge(id, self.id, DEFAULT_PDR);
+                self.add_new_edge(self.id, id, DEFAULT_WEIGHT);
+                self.add_new_edge(id, self.id, DEFAULT_WEIGHT);
                 self.start_flooding();
             }
 
@@ -1212,10 +1217,10 @@ impl WebBrowser {
                 .waiting_for_ack
                 .insert(self.packet_id_counter.clone(), f.clone());
 
-            if let Ok(packet_sent) = self.try_send_packet(packet.clone(), server_id) {
+            if let Ok(packet_sent) = self.try_send_packet(packet, server_id) {
                 self.routing_header_history.insert(
-                    PacketId::from_u64(packet.session_id),
-                    packet.routing_header.clone(),
+                    PacketId::from_u64(packet_sent.session_id),
+                    packet_sent.routing_header.clone(),
                 );
             } else {
                 self.packets_to_bo_sent_again

@@ -50,16 +50,85 @@ mod web_client_tests {
     use crossbeam_channel::{unbounded, TryRecvError};
     use petgraph::prelude::{DiGraphMap, GraphMap};
 
-    use crate::{utils::PacketId, web_client::{test::simulate_server_compression, test_utils::{client_with_graph_and_nodes_type, COMPLEX_TOPOLOGY}, Fragmentable, GraphNodeType, RequestType, WebBrowserRequest, DEFAULT_PDR}};
+    use crate::{utils::PacketId, web_client::{test::simulate_server_compression, utils_for_test::{client_with_graph_and_nodes_type, COMPLEX_TOPOLOGY}, Fragmentable, GraphNodeType, RequestType, WebBrowserRequest, DEFAULT_WEIGHT}};
 
     #[test]
     pub fn handle_ack() {
-        unimplemented!()
+        let (
+            mut client,
+            (_, _),
+            (_, _),
+            (_, _),
+            (_c_event_send, c_event_recv),
+        ) = client_with_graph_and_nodes_type(
+            DiGraphMap::new(),
+            HashMap::from([(1, GraphNodeType::Client), (2, GraphNodeType::Server)]),
+        );
+
+        let mut ack = Packet::new_ack(SourceRoutingHeader::new(vec![2], 0), 0, 0);
+        client.handle_packet(ack.clone());
+        assert_eq!(c_event_recv.recv().unwrap(), WebClientEvent::Shortcut(ack.clone()));
+
+        ack.routing_header = SourceRoutingHeader::new(vec![2, 11, 1], 2);
+        client.routing_header_history.insert(PacketId::new(), SourceRoutingHeader::new(vec![1, 11, 2], 1));
+        client.pending_requests.push(WebBrowserRequest::new(0, 2, HashMap::from([(PacketId::new(), Fragment::from_string(0, 1, String::from("ciao")))]), Compression::Huffman, RequestType::ServersType));
+        client.handle_packet(ack);
+        assert!(client.pending_requests.get(0).unwrap().waiting_for_ack.is_empty());
+        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(1., 0.));
     }
 
     #[test]
-    pub fn handle_nack() {
-        unimplemented!()
+    pub fn handle_nack_dropped() {
+        let (
+            mut client,
+            (_, _),
+            (_s_send, s_recv),
+            (_, _),
+            (_c_event_send, c_event_recv),
+        ) = client_with_graph_and_nodes_type(
+            DiGraphMap::new(),
+            HashMap::from([(1, GraphNodeType::Client), (2, GraphNodeType::Server)]),
+        );
+
+        let mut nack = Packet::new_nack(SourceRoutingHeader::new(vec![2], 0), 0, Nack { fragment_index: 0, nack_type: NackType::Dropped });
+        client.handle_packet(nack.clone());
+        assert_eq!(c_event_recv.recv().unwrap(), WebClientEvent::Shortcut(nack.clone()));
+
+        nack.routing_header = SourceRoutingHeader::new(vec![11, 1], 2);
+        client.routing_header_history.insert(PacketId::new(), SourceRoutingHeader::new(vec![1, 11, 2], 1));
+        client.pending_requests.push(WebBrowserRequest::new(0, 2, HashMap::from([(PacketId::new(), Fragment::from_string(0, 1, String::from("ciao")))]), Compression::Huffman, RequestType::ServersType));
+        client.handle_packet(nack);
+        assert!(!client.pending_requests.get(0).unwrap().waiting_for_ack.is_empty());
+        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(1., 1.));
+        assert!(client.routing_header_history.is_empty());
+        assert_eq!(s_recv.recv().unwrap(), Packet::new_flood_request(SourceRoutingHeader::empty_route(), 0, FloodRequest::initialize(1, 1, NodeType::Client)));
+    }
+
+    #[test]
+    pub fn handle_nack_error_in_routing() {
+        let (
+            mut client,
+            (_, _),
+            (_s_send, s_recv),
+            (_, _),
+            (_c_event_send, c_event_recv),
+        ) = client_with_graph_and_nodes_type(
+            DiGraphMap::new(),
+            HashMap::from([(1, GraphNodeType::Client), (2, GraphNodeType::Server)]),
+        );
+
+        let mut nack = Packet::new_nack(SourceRoutingHeader::new(vec![2], 0), 0, Nack { fragment_index: 0, nack_type: NackType::ErrorInRouting(11) });
+        client.handle_packet(nack.clone());
+        assert_eq!(c_event_recv.recv().unwrap(), WebClientEvent::Shortcut(nack.clone()));
+
+        nack.routing_header = SourceRoutingHeader::new(vec![11, 1], 2);
+        client.routing_header_history.insert(PacketId::new(), SourceRoutingHeader::new(vec![1, 11, 2], 1));
+        client.pending_requests.push(WebBrowserRequest::new(0, 2, HashMap::from([(PacketId::new(), Fragment::from_string(0, 1, String::from("ciao")))]), Compression::Huffman, RequestType::ServersType));
+        client.handle_packet(nack);
+        assert!(!client.pending_requests.get(0).unwrap().waiting_for_ack.is_empty());
+        assert!(!client.topology_graph.contains_node(11));
+        assert!(client.routing_header_history.is_empty());
+        assert_eq!(s_recv.recv().unwrap(), Packet::new_flood_request(SourceRoutingHeader::empty_route(), 0, FloodRequest::initialize(1, 1, NodeType::Client)));
     }
 
     #[test]
@@ -282,7 +351,7 @@ mod web_client_tests {
         client.add_new_edge(1, 2, 9.);
         assert!(client.topology_graph.contains_edge(1, 2));
         client.add_new_edge(1, 11, 23.);
-        assert_eq!(client.topology_graph.edge_weight(1, 11), Some(&DEFAULT_PDR));
+        assert_eq!(client.topology_graph.edge_weight(1, 11), Some(&DEFAULT_WEIGHT));
     }
 
     #[test]
@@ -418,94 +487,52 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn pdr_estimation() {
-        let (
-            mut client,
-            (_c_send, _c_recv),
-            (_s_send, s_recv),
-            (_c_command_send, _c_command_recv),
-            (_c_event_send, c_event_recv),
-        ) = client_with_graph_and_nodes_type(
-            DiGraphMap::from_edges([(1, 11, DEFAULT_PDR), (11, 1, DEFAULT_PDR)]),
-            HashMap::from([(1, GraphNodeType::Client)]),
-        );
-
-        let header = SourceRoutingHeader::new(vec![1, 11, 12], 0);
-
-        client.packets_sent_counter.insert(11, (0., 0.));
-        client.update_pdr_after_ack(&header);
-        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(1., 0.));
-        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &0.);
-
-        client.update_pdr_after_nack(&header, 11);
-        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(2., 1.));
-        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &0.5);
-
-        client.update_pdr_after_ack(&header);
-        client.update_pdr_after_ack(&header);
-        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(4., 1.));
-        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &0.25);
-
-        client.update_pdr_after_ack(&header);
-        client.update_pdr_after_nack(&header, 11);
-        client.update_pdr_after_nack(&header, 11);
-        client.update_pdr_after_nack(&header, 11);
-        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(8., 4.));
-        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &0.5);
-
-        for _ in 0..8 {
-            client.update_pdr_after_nack(&header, 11);
-        }
-        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(16., 12.));
-        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &0.75);
-    }
-
-    #[test]
     pub fn graph_weight_update() {
         let (
             mut client,
-            (_c_send, _c_recv),
-            (_s_send, _s_recv),
-            (_c_command_send, _c_command_recv),
-            (_c_event_send, _c_event_recv),
+            (_, _),
+            (_, _),
+            (_, _),
+            (_, _),
         ) = client_with_graph_and_nodes_type(
-            GraphMap::from_edges([
-                (1, 11, DEFAULT_PDR),
-                (11, 1, DEFAULT_PDR),
-                (1, 12, DEFAULT_PDR),
-                (12, 1, DEFAULT_PDR),
-                (12, 21, DEFAULT_PDR),
-                (11, 21, DEFAULT_PDR),
-            ]),
+            DiGraphMap::from_edges([(1, 11, DEFAULT_WEIGHT), (11, 1, DEFAULT_WEIGHT)]),
             HashMap::from([(1, GraphNodeType::Client)]),
         );
 
         let header = SourceRoutingHeader::new(vec![1, 11, 12], 0);
 
         client.packets_sent_counter.insert(11, (0., 0.));
-        client.packets_sent_counter.insert(12, (0., 0.));
+        client.update_packet_counter_after_ack(&header);
+        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(1., 0.));
+        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &1.);
 
-        client.update_pdr_after_ack(&header);
-        client.update_pdr_after_nack(&header, 11);
-        client.update_pdr_after_ack(&header);
-        client.update_pdr_after_ack(&header);
-        client.update_pdr_after_ack(&header);
-        client.update_pdr_after_nack(&header, 11);
-        client.update_pdr_after_nack(&header, 11);
-        client.update_pdr_after_nack(&header, 11);
-        client.update_pdr_after_ack(&header);
-        client.update_pdr_after_ack(&header);
-        client.update_pdr_after_ack(&header);
-        client.update_pdr_after_nack(&header, 12);
-        assert_eq!(
-            *client.topology_graph.edge_weight(client.id, 11).unwrap(),
-            4. / 11.
-        );
+        client.update_packet_counter_after_nack(&header, 11);
+        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(2., 1.));
+        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &2.);
 
-        assert_eq!(
-            *client.topology_graph.edge_weight(client.id, 12).unwrap(),
-            1. / 8.
-        );
+        client.update_packet_counter_after_ack(&header);
+        client.update_packet_counter_after_ack(&header);
+        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(4., 1.));
+        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &(4. / 3.));
+
+        client.update_packet_counter_after_ack(&header);
+        client.update_packet_counter_after_nack(&header, 11);
+        client.update_packet_counter_after_nack(&header, 11);
+        client.update_packet_counter_after_nack(&header, 11);
+        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(8., 4.));
+        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &2.);
+
+        for _ in 0..8 {
+            client.update_packet_counter_after_nack(&header, 11);
+        }
+        assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(16., 12.));
+        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &4.);
+
+        *client.packets_sent_counter.get_mut(&11).unwrap() = (0.,0.);
+        client.update_packet_counter_after_nack(&header, 11);
+        assert!(client.topology_graph.edge_weight(1, 11).unwrap().is_infinite());
+
+
     }
 
     #[test]
@@ -544,7 +571,7 @@ mod web_client_tests {
             (_c_command_send, _c_command_recv),
             (_c_event_send, _c_event_recv),
         ) = client_with_graph_and_nodes_type(
-            DiGraphMap::from_edges([(1, 11, DEFAULT_PDR), (11, 1, DEFAULT_PDR)]),
+            DiGraphMap::from_edges([(1, 11, DEFAULT_WEIGHT), (11, 1, DEFAULT_WEIGHT)]),
             HashMap::from([(1, GraphNodeType::Client), (11, GraphNodeType::Drone)]),
         );
 
@@ -574,9 +601,9 @@ mod web_client_tests {
             (_c_event_send, c_event_recv),
         ) = client_with_graph_and_nodes_type(
             DiGraphMap::from_edges([
-                (1, 11, DEFAULT_PDR),
-                (11, 1, DEFAULT_PDR),
-                (11, 21, DEFAULT_PDR),
+                (1, 11, DEFAULT_WEIGHT),
+                (11, 1, DEFAULT_WEIGHT),
+                (11, 21, DEFAULT_WEIGHT),
             ]),
             HashMap::from([
                 (1, GraphNodeType::Client),
@@ -667,9 +694,9 @@ mod web_client_tests {
         let (mut client, (_, _), (_s_send, s_recv), (_, _), (_c_event_send, c_event_recv)) =
             client_with_graph_and_nodes_type(
                 GraphMap::from_edges([
-                    (1, 11, DEFAULT_PDR),
-                    (11, 1, DEFAULT_PDR),
-                    (11, 21, DEFAULT_PDR),
+                    (1, 11, DEFAULT_WEIGHT),
+                    (11, 1, DEFAULT_WEIGHT),
+                    (11, 21, DEFAULT_WEIGHT),
                 ]),
                 HashMap::from([
                     (1, GraphNodeType::Client),
@@ -800,9 +827,9 @@ mod web_client_tests {
         let (mut client, (_, _), (_s_send, s_recv), (_, _), (_c_event_send, c_event_recv)) =
             client_with_graph_and_nodes_type(
                 GraphMap::from_edges([
-                    (1, 11, DEFAULT_PDR),
-                    (11, 1, DEFAULT_PDR),
-                    (11, 21, DEFAULT_PDR),
+                    (1, 11, DEFAULT_WEIGHT),
+                    (11, 1, DEFAULT_WEIGHT),
+                    (11, 21, DEFAULT_WEIGHT),
                 ]),
                 HashMap::from([
                     (1, GraphNodeType::Client),
@@ -838,8 +865,8 @@ mod web_client_tests {
         for _ in 0..2 {
             let nack = Packet::new_nack(
                 SourceRoutingHeader {
-                    hop_index: 2,
-                    hops: vec![21, 11, 1],
+                    hop_index: 1,
+                    hops: vec![11, 1],
                 },
                 req.session_id,
                 Nack {
@@ -886,22 +913,23 @@ mod web_client_tests {
         client.handle_packet(nack);
         assert_eq!(client.topology_graph.edge_count(), 0);
         assert_eq!(client.topology_graph.node_count(), 2);
-        // remove flood request (the node 11 has been removed -> disconnected graph)
+        // remove flood request
         assert!(matches!(
             s_recv.recv().unwrap().pack_type,
             PacketType::FloodRequest(_)
         ));
 
         client.topology_graph = GraphMap::from_edges([
-            (1, 11, DEFAULT_PDR),
-            (11, 1, DEFAULT_PDR),
-            (11, 21, DEFAULT_PDR),
+            (1, 11, DEFAULT_WEIGHT),
+            (11, 1, DEFAULT_WEIGHT),
+            (11, 21, DEFAULT_WEIGHT),
         ]);
         client.nodes_type = HashMap::from([
             (1, GraphNodeType::Client),
             (11, GraphNodeType::Drone),
             (21, GraphNodeType::TextServer),
         ]);
+        client.packets_sent_counter.insert(11, (0., 0.));
 
         client.try_resend_packet();
 
@@ -978,10 +1006,11 @@ mod web_client_tests {
 
         let resp = c_event_recv.recv().unwrap();
         //println!("--{:?}", resp);
-
+        println!("{:?}", client.packets_sent_counter);
         if let WebClientEvent::ListOfFiles(files, id) = resp {
             assert_eq!(files, vec!["file1".to_string(), "file2".to_string()]);
             assert_eq!(id, 21);
+
         } else {
             assert!(false)
         }
@@ -994,9 +1023,9 @@ mod web_client_tests {
         let (mut client, (_, _), (_s_send, s_recv), (_, _), (_c_event_send, c_event_recv)) =
             client_with_graph_and_nodes_type(
                 GraphMap::from_edges([
-                    (1, 11, DEFAULT_PDR),
-                    (11, 1, DEFAULT_PDR),
-                    (11, 21, DEFAULT_PDR),
+                    (1, 11, DEFAULT_WEIGHT),
+                    (11, 1, DEFAULT_WEIGHT),
+                    (11, 21, DEFAULT_WEIGHT),
                 ]),
                 HashMap::from([
                     (1, GraphNodeType::Client),
@@ -1089,9 +1118,9 @@ mod web_client_tests {
         let (mut client, (_, _), (_, _), (_, _), (_c_event_send, c_event_recv)) =
             client_with_graph_and_nodes_type(
                 GraphMap::from_edges([
-                    (1, 11, DEFAULT_PDR),
-                    (11, 1, DEFAULT_PDR),
-                    (11, 21, DEFAULT_PDR),
+                    (1, 11, DEFAULT_WEIGHT),
+                    (11, 1, DEFAULT_WEIGHT),
+                    (11, 21, DEFAULT_WEIGHT),
                 ]),
                 HashMap::from([
                     (1, GraphNodeType::Client),
@@ -1141,9 +1170,9 @@ mod web_client_tests {
         let (mut client, (_, _), (_s_send, s_recv), (_, _), (_c_event_send, c_event_recv)) =
             client_with_graph_and_nodes_type(
                 GraphMap::from_edges([
-                    (1, 11, DEFAULT_PDR),
-                    (11, 1, DEFAULT_PDR),
-                    (11, 21, DEFAULT_PDR),
+                    (1, 11, DEFAULT_WEIGHT),
+                    (11, 1, DEFAULT_WEIGHT),
+                    (11, 21, DEFAULT_WEIGHT),
                 ]),
                 HashMap::from([
                     (1, GraphNodeType::Client),
@@ -1320,9 +1349,9 @@ mod web_client_tests {
         let (mut client, (_, _), (_s_send, s_recv), (_, _), (_c_event_send, c_event_recv)) =
             client_with_graph_and_nodes_type(
                 GraphMap::from_edges([
-                    (1, 11, DEFAULT_PDR),
-                    (11, 1, DEFAULT_PDR),
-                    (11, 21, DEFAULT_PDR),
+                    (1, 11, DEFAULT_WEIGHT),
+                    (11, 1, DEFAULT_WEIGHT),
+                    (11, 21, DEFAULT_WEIGHT),
                 ]),
                 HashMap::from([
                     (1, GraphNodeType::Client),
@@ -1549,9 +1578,9 @@ mod web_client_tests {
         let (mut client, (_, _), (_s_send, s_recv), (_, _), (_, _)) =
             client_with_graph_and_nodes_type(
                 GraphMap::from_edges([
-                    (1, 11, DEFAULT_PDR),
-                    (11, 1, DEFAULT_PDR),
-                    (11, 21, DEFAULT_PDR),
+                    (1, 11, DEFAULT_WEIGHT),
+                    (11, 1, DEFAULT_WEIGHT),
+                    (11, 21, DEFAULT_WEIGHT),
                 ]),
                 HashMap::from([
                     (1, GraphNodeType::Client),
@@ -1594,9 +1623,9 @@ mod web_client_tests {
     pub fn try_resend_packet_unsuccessfully() {
         let (mut client, (_, _), (_, _), (_, _), (_, _)) = client_with_graph_and_nodes_type(
             GraphMap::from_edges([
-                (1, 11, DEFAULT_PDR),
-                (11, 1, DEFAULT_PDR),
-                (11, 21, DEFAULT_PDR),
+                (1, 11, DEFAULT_WEIGHT),
+                (11, 1, DEFAULT_WEIGHT),
+                (11, 21, DEFAULT_WEIGHT),
             ]),
             HashMap::from([
                 (1, GraphNodeType::Client),
@@ -1635,9 +1664,9 @@ mod web_client_tests {
         let (client, (_, _), (_, _), (_, _), (_c_event_send, c_event_recv)) =
             client_with_graph_and_nodes_type(
                 GraphMap::from_edges([
-                    (1, 11, DEFAULT_PDR),
-                    (11, 1, DEFAULT_PDR),
-                    (11, 21, DEFAULT_PDR),
+                    (1, 11, DEFAULT_WEIGHT),
+                    (11, 1, DEFAULT_WEIGHT),
+                    (11, 21, DEFAULT_WEIGHT),
                 ]),
                 HashMap::from([
                     (1, GraphNodeType::Client),
@@ -1658,9 +1687,9 @@ mod web_client_tests {
         let (client, (_, _), (_, _), (_, _), (_c_event_send, c_event_recv)) =
             client_with_graph_and_nodes_type(
                 GraphMap::from_edges([
-                    (1, 11, DEFAULT_PDR),
-                    (11, 1, DEFAULT_PDR),
-                    (11, 21, DEFAULT_PDR),
+                    (1, 11, DEFAULT_WEIGHT),
+                    (11, 1, DEFAULT_WEIGHT),
+                    (11, 21, DEFAULT_WEIGHT),
                 ]),
                 HashMap::from([
                     (1, GraphNodeType::Client),
@@ -1680,9 +1709,9 @@ mod web_client_tests {
         let (client, (_, _), (_, _), (_, _), (_c_event_send, c_event_recv)) =
             client_with_graph_and_nodes_type(
                 GraphMap::from_edges([
-                    (1, 11, DEFAULT_PDR),
-                    (11, 1, DEFAULT_PDR),
-                    (11, 21, DEFAULT_PDR),
+                    (1, 11, DEFAULT_WEIGHT),
+                    (11, 1, DEFAULT_WEIGHT),
+                    (11, 21, DEFAULT_WEIGHT),
                 ]),
                 HashMap::from([
                     (1, GraphNodeType::Client),

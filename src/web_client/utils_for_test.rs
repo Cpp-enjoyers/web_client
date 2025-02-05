@@ -5,23 +5,23 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use petgraph::{prelude::GraphMap, Directed};
 use wg_2024::{network::NodeId, packet::Packet};
 
-use super::{GraphNodeType, WebBrowser, DEFAULT_PDR};
+use super::{GraphNodeType, WebBrowser, DEFAULT_WEIGHT};
 
 pub(crate) const COMPLEX_TOPOLOGY: [(u8, u8, f64); 14] = [
-        (1, 11, DEFAULT_PDR),
-        (11, 1, DEFAULT_PDR),
-        (11, 12, DEFAULT_PDR),
-        (12, 11, DEFAULT_PDR),
-        (13, 11, DEFAULT_PDR),
-        (11, 13, DEFAULT_PDR),
-        (14, 11, DEFAULT_PDR),
-        (11, 14, DEFAULT_PDR),
-        (13, 14, DEFAULT_PDR),
-        (14, 13, DEFAULT_PDR),
-        (1, 12, DEFAULT_PDR),
-        (12, 1, DEFAULT_PDR),
-        (13, 2, DEFAULT_PDR),
-        (14, 2, DEFAULT_PDR),
+        (1, 11, DEFAULT_WEIGHT),
+        (11, 1, DEFAULT_WEIGHT),
+        (11, 12, DEFAULT_WEIGHT),
+        (12, 11, DEFAULT_WEIGHT),
+        (13, 11, DEFAULT_WEIGHT),
+        (11, 13, DEFAULT_WEIGHT),
+        (14, 11, DEFAULT_WEIGHT),
+        (11, 14, DEFAULT_WEIGHT),
+        (13, 14, DEFAULT_WEIGHT),
+        (14, 13, DEFAULT_WEIGHT),
+        (1, 12, DEFAULT_WEIGHT),
+        (12, 1, DEFAULT_WEIGHT),
+        (13, 2, DEFAULT_WEIGHT),
+        (14, 2, DEFAULT_WEIGHT),
     ];
 
 pub(crate) fn client_with_graph_and_nodes_type(
