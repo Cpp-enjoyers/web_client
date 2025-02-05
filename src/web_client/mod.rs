@@ -1,6 +1,5 @@
 use common::slc_commands::{ServerType, TextMediaResponse, WebClientCommand, WebClientEvent};
 use compression::huffman::HuffmanCompressor;
-use env_logger::Target;
 use flooding::RING_BUFF_SZ;
 use core::time;
 use crossbeam_channel::{select_biased, Receiver, SendError, Sender};
