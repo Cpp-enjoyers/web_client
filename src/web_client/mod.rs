@@ -1,5 +1,6 @@
 use common::slc_commands::{ServerType, TextMediaResponse, WebClientCommand, WebClientEvent};
 use compression::huffman::HuffmanCompressor;
+use env_logger::Target;
 use flooding::RING_BUFF_SZ;
 use core::time;
 use crossbeam_channel::{select_biased, Receiver, SendError, Sender};
@@ -14,7 +15,7 @@ use wg_2024::packet::{
     Ack, FloodRequest, FloodResponse, Fragment, Nack, NackType, NodeType, Packet, PacketType,
     FRAGMENT_DSIZE,
 };
-
+use log::{error, warn, info};
 use common::networking::flooder::Flooder;
 use common::ring_buffer::RingBuffer;
 use common::web_messages;
@@ -245,7 +246,7 @@ impl WebBrowserRequest {
 #[derive(Debug)]
 pub struct WebBrowser {
     id: NodeId,
-    //log_channel: String,
+    log_prefix: String,
     controller_send: Sender<WebClientEvent>,
     controller_recv: Receiver<WebClientCommand>,
     packet_recv: Receiver<Packet>,
@@ -263,7 +264,6 @@ pub struct WebBrowser {
     packets_sent_counter: HashMap<NodeId, (f64, f64)>, // track the number of packets (sent, lost) through every drone
     routing_header_history: HashMap<PacketId, SourceRoutingHeader>, // keep track of the route of each packet until ack or nack are received, in order to correctly estimate PDR
 }
-
 
 impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
     fn new(
@@ -284,7 +284,7 @@ impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
 
         Self {
             id,
-            //log_channel,
+            log_prefix: format!("Web Client[{}]", id),
             controller_send,
             controller_recv,
             packet_recv,
@@ -305,6 +305,7 @@ impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
     }
 
     fn run(&mut self) {
+        info!(target: &self.log_prefix, "Web client is running");
         sleep(time::Duration::from_millis(100));
         self.start_flooding();
 
@@ -332,16 +333,17 @@ impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
 }
 
 impl WebBrowser {
-    // ! unit vs integration tests, logs
+    // ! unit vs integration tests, logs, doc
 
-    // TESTED
     fn internal_send_to_controller(&self, msg: WebClientEvent) {
-        if let Err(e) = self.controller_send.send(msg) {
-            println!("client {} - cannot send to scl: {e:?}", self.id);
+        if let Err(e) = self.controller_send.send(msg.clone()) {
+            error!(target: &self.log_prefix, "internal_send_to_controller: Cannot send message to scl: {e:?}");
+        }
+        else {
+            info!(target: &self.log_prefix, "internal_send_to_controller: Message sent to scl: {:?}", msg);
         }
     }
 
-    // TESTED
     fn try_resend_packet(&mut self) {
         if let Some((id, frag)) = self.packets_to_bo_sent_again.pop_front() {
             if let Some(req) = self
@@ -361,33 +363,35 @@ impl WebBrowser {
                             PacketId::from_u64(packet_sent.session_id),
                             packet_sent.routing_header.clone(),
                         );
+
+                        info!(target: &self.log_prefix, "internal_send_to_controller: A message that received a NACK has been sent again: {:?}", packet_sent);
                     }
 
                     Err(e) => {
                         self.packets_to_bo_sent_again
                             .push_back((PacketId::from_u64(e.0.session_id), frag));
+
+                        info!(target: &self.log_prefix, "internal_send_to_controller: A message thta received a NACK couldn't be sent again: {:?}", e.into_inner());
                     }
                 }
             } else {
-                println!("client {} - Found a packet in waiting_for_flood without the corresponding request. BUG", self.id);
-                unreachable!()
+                error!(target: &self.log_prefix, "internal_send_to_controller: Found a message to be sent again without the corresponding pending request. BUG");
             }
         }
     }
 
-    // TESTED
     fn try_complete_request(&mut self) {
         if let Some(i) = self
             .pending_requests
             .iter()
             .position(|req| req.response_is_complete && req.waiting_for_ack.is_empty())
         {
+            info!(target: &self.log_prefix, "try_complete_request: Found a request ready to be completed");
             let req = self.pending_requests.remove(i);
             self.complete_request(req);
         }
 
-        // search for an entry that, for each of the needed media, it either is in cache or the owner is None
-
+        // search for a text file whose needed media are either unavailable or already arrived to the client
         if let Some(key) = self
             .text_media_map
             .iter()
@@ -425,13 +429,12 @@ impl WebBrowser {
             })
             .map(|(key, _)| key.clone())
         {
+            info!(target: &self.log_prefix, "try_complete_request: Found a text file with all its media");
             self.send_text_and_media_back(&key);
         }
     }
 
-    // TESTED
     fn send_text_and_media_back(&mut self, key: &(NodeId, String)) {
-        println!("send_text_and_media_back");
         if let Some(media_list) = self.text_media_map.remove(key) {
             // ! unwrap of the text file must work
             let html_file = (
@@ -451,6 +454,8 @@ impl WebBrowser {
                     .remove(&media_full_name);
             }
 
+            info!(target: &self.log_prefix, "send_text_and_media_back: Sending to scl the text file {:?} and all its needed media {:?}", html_file, media_files);
+
             self.internal_send_to_controller(WebClientEvent::FileFromClient(
                 TextMediaResponse::new(html_file, media_files),
                 key.0,
@@ -458,19 +463,17 @@ impl WebBrowser {
         }
     }
 
-    // TESTED
     fn shortcut(&self, packet: Packet) {
         match packet.routing_header.destination() {
             Some(_) => {
                 self.internal_send_to_controller(WebClientEvent::Shortcut(packet));
             }
             None => {
-                println!("Client {} - Packet doesn't contain a destination, it's pointless to shortcut, dropping", self.id);
+                error!(target: &self.log_prefix, "shortcut: Packet doesn't contain a destination, it's pointless to shortcut, dropping");
             }
         }
     }
 
-    // TESTED
     fn try_send_packet(&self, p: Packet, dest: NodeId) -> Result<Packet, Box<SendError<Packet>>> {
         let mut final_packet: Packet;
         let opt_chn: Option<&Sender<Packet>>;
@@ -493,20 +496,24 @@ impl WebBrowser {
 
         if let Some(channel) = opt_chn {
             if let Err(e) = channel.send(final_packet.clone()) {
-                println!("client {} - CANNOT send packet: {e}", self.id);
+                error!(target: &self.log_prefix, "try_send_packet: Error while sending to {dest} the packet: {e:?}");
                 return Err(Box::new(e));
             }
 
             let _ = self
                 .controller_send
                 .send(WebClientEvent::PacketSent(final_packet.clone()));
+
+            info!(target: &self.log_prefix, "try_send_packet: Packet correctly sent the packet with ID: {} to {dest}", final_packet.session_id);
+
             Ok(final_packet)
         } else {
+            error!(target: &self.log_prefix, "try_send_packet: Channel not found towards node: {dest} the packet: {final_packet:?}");
+
             Err(Box::new(SendError(final_packet)))
         }
     }
 
-    // TESTED
     fn is_correct_server_type(&self, server_id: NodeId, requested_type: &GraphNodeType) -> bool {
         self.nodes_type
             .get(&server_id)
@@ -518,7 +525,6 @@ impl WebBrowser {
        an updated packet with the new header and an optional channel.
        if no path exist or the channel isn't open, the returned option is None
     */
-    // TESTED
     fn prepare_packet_routing(
         &self,
         mut packet: Packet,
@@ -545,39 +551,36 @@ impl WebBrowser {
 
                         _ => {}
                     }
-                    println!("client {} - found a path towards {:?}", self.id, dest);
+                    info!(target: &self.log_prefix, "prepare_packet_routing: found a path towards node: {dest:?}");
 
                     return (packet, Some(channel));
                 }
             }
         }
-        println!("client {} - CANNOT find a path towards {}", self.id, dest);
+        error!(target: &self.log_prefix, "prepare_packet_routing: did not found a path towards node: {dest:?} to send packet: {packet:?}");
 
         (packet, None)
     }
 
-    // TESTED
     fn client_is_destination(&self, p: &Packet) -> bool {
         p.routing_header
             .destination()
             .is_some_and(|dest| dest == self.id)
     }
 
-    // TESTED
     fn get_request_index(&self, p: &Packet) -> Option<usize> {
         self.pending_requests
             .iter()
             .position(|req| req.request_id == PacketId::from_u64(p.session_id).get_request_id())
     }
 
-    // TESTED
     fn add_new_edge(&mut self, from: NodeId, to: NodeId, weight: f64) {
         if !self.topology_graph.contains_edge(from, to) {
             self.topology_graph.add_edge(from, to, weight);
+            info!(target: &self.log_prefix, "add_new_edge: Added the edge from {from} to {to}");
         }
     }
 
-    // TESTED
     fn remove_node(&mut self, node_to_remove: NodeId) {
         if self
             .nodes_type
@@ -587,26 +590,26 @@ impl WebBrowser {
             self.topology_graph.remove_node(node_to_remove);
             self.nodes_type.remove(&node_to_remove);
             self.packets_sent_counter.remove(&node_to_remove);
+            info!(target: &self.log_prefix, "remove_node: Removed the node {node_to_remove} from graph");
         }
     }
 
-    // TESTED
     fn update_graph_weight(&mut self, drone_id: NodeId) {
         let new_weight = self
             .packets_sent_counter
             .get(&drone_id)
             .map_or(1., |(d, n)| 1. / (1. - (*n / *d)));
 
-        for (_, _, weight) in self
+        for (from, to, weight) in self
             .topology_graph
             .all_edges_mut()
             .filter(|(_, to, _)| *to == drone_id)
         {
             *weight = new_weight;
+            info!(target: &self.log_prefix, "update_graph_weight: Edge from {from} to {to} has now weight of {new_weight}");
         }
     }
 
-    // TESTED
     fn update_packet_counter_after_nack(&mut self, header: &SourceRoutingHeader, problematic_node: NodeId) {
         for id in &header.hops {
             if *id == problematic_node {
@@ -628,7 +631,6 @@ impl WebBrowser {
         self.update_graph_weight(problematic_node);
     }
 
-    // TESTED
     fn update_packet_counter_after_ack(&mut self, header: &SourceRoutingHeader) {
         for drone_id in &header.hops {
             self.packets_sent_counter
@@ -639,26 +641,21 @@ impl WebBrowser {
         }
     }
 
-    // TESTED
     fn handle_flood_response(&mut self, packet: Packet, resp: &FloodResponse) {
         let initiator: Option<&(NodeId, NodeType)> = resp.path_trace.first();
 
         if initiator.is_none() {
-            println!(
-                "client {} - Received a flood response with empty path trace, dropping",
-                self.id
-            );
+            error!(target: &self.log_prefix, "handle_flood_response: Received a flood response with empty path trace, dropping");
             return;
         }
 
         if initiator.unwrap().0 == self.id {
             if resp.flood_id != self.sequential_flood_id {
-                println!(
-                    "client {} - received a flood response started by me with wrong flood_id, dropping",
-                    self.id
-                );
+                info!(target: &self.log_prefix, "handle_flood_response: Received an old flood response, ignoring");
                 return;
             }
+            info!(target: &self.log_prefix, "handle_flood_response: Received a flood response, updating graph...");
+
             let mut prev: Option<(NodeId, NodeType)> = None;
             for (id, node_type) in &resp.path_trace {
                 if let Some((from_id, from_type)) = prev {
@@ -698,23 +695,20 @@ impl WebBrowser {
                 prev = Some((*id, *node_type));
             }
 
-            println!(
-                "client: {} - graph: {:?} - nodes type: {:?}",
-                self.id, self.topology_graph, self.nodes_type
-            );
+
         } else if let Some(next_hop_drone_id) = packet.routing_header.next_hop() {
             if let Err(e) = self.try_send_packet(packet, next_hop_drone_id) {
                 // I don't have the channel to forward the flood response - SHORTCUT
                 self.shortcut(e.0);
             }
         } else {
-            println!("client {} - Found a flood response with a corrupted routing header, I don't know who is the next hop nor, consequently, the original initiator to shortcut this packet. Dropping", self.id);
-            unreachable!()
+            error!(target: &self.log_prefix, "handle_flood_response: Found a flood response with a corrupted routing header which it's pointless to shortcut, dropping");
         }
     }
 
     fn handle_ack(&mut self, packet: Packet, ack: &Ack) {
         if !self.client_is_destination(&packet) {
+            error!(target: &self.log_prefix, "handle_ack: Received an ack that is not for me");
             self.shortcut(packet);
             return;
         }
@@ -726,21 +720,19 @@ impl WebBrowser {
                 if req.waiting_for_ack.remove(&packet_id).is_some() {
                     if let Some(header) = self.routing_header_history.remove(&packet_id) {
                         self.update_packet_counter_after_ack(&header);
+                        info!(target: &self.log_prefix, "handle_ack: ack correctly elaborated {packet:?}");
+
                     }
                 } else {
-                    println!("client {} - I received an ack {:?} for a packet that has already been acknowledged, bug for me or for the sender", self.id, ack);
+                    info!(target: &self.log_prefix, "handle_ack: I received an ack for a packet that has already been acknowledged: {packet:?}");
                 }
             }
             None => {
-                println!(
-                    "client {} - I received an ack for an unknown req_id, dropping",
-                    self.id
-                );
+                info!(target: &self.log_prefix, "handle_ack: I received an ack for an unknown req_id, dropping: {packet:?}");
             }
         }
     }
 
-    // TESTED
     fn handle_fragment(&mut self, packet: Packet, fragment: &Fragment) {
         if !self.client_is_destination(&packet) {
             self.shortcut(packet);
@@ -874,7 +866,6 @@ impl WebBrowser {
         }
     }
 
-    // TESTED
     fn handle_packet(&mut self, packet: Packet) {
         println!("client {} - handling packet: {:?}", self.id, packet);
         match packet.pack_type.clone() {
@@ -901,7 +892,6 @@ impl WebBrowser {
         }
     }
 
-    // TESTED
     fn complete_request_with_generic_response(
         &mut self,
         server_id: NodeId,
@@ -948,7 +938,6 @@ impl WebBrowser {
         }
     }
 
-    // TESTED
     fn complete_request_with_text_response(
         &mut self,
         server_id: NodeId,
@@ -1042,7 +1031,6 @@ impl WebBrowser {
         }
     }
 
-    // TESTED
     fn complete_request_with_media_response(
         &mut self,
         server_id: NodeId,
@@ -1137,7 +1125,6 @@ impl WebBrowser {
         }
     }
 
-    // TESTED
     fn handle_command(&mut self, command: WebClientCommand) {
         println!("Handling command {command:?}");
         match command {
@@ -1169,7 +1156,6 @@ impl WebBrowser {
         }
     }
 
-    // TESTED
     fn start_flooding(&mut self) {
         self.sequential_flood_id += 1;
         println!("client {} - starting flood", self.id);
@@ -1189,7 +1175,6 @@ impl WebBrowser {
         }
     }
 
-    // TESTED
     fn add_request(
         &mut self,
         server_id: NodeId,
@@ -1235,7 +1220,6 @@ impl WebBrowser {
         self.packet_id_counter.increment_request_id();
     }
 
-    // TESTED
     fn create_request(&mut self, request_type: RequestType) {
         let compression: Compression; // TODO has to be chosen by scl or randomically
 

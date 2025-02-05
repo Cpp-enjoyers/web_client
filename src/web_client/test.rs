@@ -37,10 +37,11 @@ fn simulate_server_compression(before: ResponseMessage) -> Vec<Fragment> {
 
 #[cfg(test)]
 mod web_client_tests {
-    use common::{slc_commands::{ServerType, TextMediaResponse}, web_messages::{self, Compression, GenericResponse, MediaResponse, RequestMessage, ResponseMessage, TextResponse}};
+
+    use common::{slc_commands::{ServerType, TextMediaResponse}, web_messages::{self, Compression, GenericResponse, MediaResponse, RequestMessage, ResponseMessage, TextResponse}, Client};
     use itertools::Either;
     use wg_2024::{network::SourceRoutingHeader, packet::{Ack, FloodRequest, Fragment, Nack, NackType, NodeType, Packet, PacketType}};
-    use std::collections::{HashMap, VecDeque};
+    use std::{collections::{HashMap, VecDeque}, env};
     use std::vec;
 
     use common::{
@@ -1575,6 +1576,7 @@ mod web_client_tests {
 
     #[test]
     pub fn try_resend_packet_successfully() {
+
         let (mut client, (_, _), (_s_send, s_recv), (_, _), (_, _)) =
             client_with_graph_and_nodes_type(
                 GraphMap::from_edges([
@@ -1588,7 +1590,6 @@ mod web_client_tests {
                     (21, GraphNodeType::MediaServer),
                 ]),
             );
-
         let frag = Fragment::from_string(0, 1, "ciao".to_string());
         let id = PacketId::from_u64(1 << 40);
 
