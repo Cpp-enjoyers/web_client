@@ -215,7 +215,7 @@ enum RequestType {
     Media(String, NodeId),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct WebBrowserRequest {
     request_id: RequestId,
     server_id: NodeId,
@@ -334,7 +334,7 @@ impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
             stored_files: HashMap::new(),
             packets_sent_counter,
             media_file_either_owner_or_request_left: HashMap::new(),
-            routing_header_history: HashMap::new()
+            routing_header_history: HashMap::new(),
         }
     }
 
@@ -592,24 +592,28 @@ impl WebBrowser {
         (packet, None)
     }
 
+    // TESTED
     fn client_is_destination(&self, p: &Packet) -> bool {
         p.routing_header
             .destination()
             .is_some_and(|dest| dest == self.id)
     }
 
+    // TESTED
     fn get_request_index(&self, p: &Packet) -> Option<usize> {
         self.pending_requests
             .iter()
             .position(|req| req.request_id == PacketId::from_u64(p.session_id).get_request_id())
     }
 
-    fn add_edge_if_not_already_in(&mut self, from: NodeId, to: NodeId, weight: f64) {
+    // TESTED
+    fn add_new_edge(&mut self, from: NodeId, to: NodeId, weight: f64) {
         if !self.topology_graph.contains_edge(from, to) {
             self.topology_graph.add_edge(from, to, weight);
         }
     }
 
+    // TESTED
     fn remove_node(&mut self, node_to_remove: NodeId) {
         if self
             .nodes_type
@@ -628,8 +632,6 @@ impl WebBrowser {
             .get(&drone_id)
             .map_or(1., |(d, n)| *n / *d);
 
-
-
         for (_, _, weight) in self
             .topology_graph
             .all_edges_mut()
@@ -640,13 +642,14 @@ impl WebBrowser {
     }
 
     fn update_pdr_after_nack(&mut self, header: &SourceRoutingHeader, problematic_node: NodeId) {
-
-        for id in &header.hops{
-            if *id == problematic_node{
+        for id in &header.hops {
+            if *id == problematic_node {
                 break;
             }
 
-            self.packets_sent_counter.entry(*id).and_modify(|(sent, _)| *sent += 1.);
+            self.packets_sent_counter
+                .entry(*id)
+                .and_modify(|(sent, _)| *sent += 1.);
         }
 
         self.packets_sent_counter
@@ -660,7 +663,6 @@ impl WebBrowser {
     }
 
     fn update_pdr_after_ack(&mut self, header: &SourceRoutingHeader) {
-
         for drone_id in &header.hops {
             self.packets_sent_counter
                 .entry(*drone_id)
@@ -693,21 +695,21 @@ impl WebBrowser {
             for (id, node_type) in &resp.path_trace {
                 if let Some((from_id, from_type)) = prev {
                     if *id == self.id || from_id == self.id {
-                        self.add_edge_if_not_already_in(from_id, *id, DEFAULT_PDR);
-                        self.add_edge_if_not_already_in(*id, from_id, DEFAULT_PDR);
+                        self.add_new_edge(from_id, *id, DEFAULT_PDR);
+                        self.add_new_edge(*id, from_id, DEFAULT_PDR);
                     } else {
                         // this prevents A* to find path with client/server in the middle
                         if matches!(from_type, NodeType::Client)
                             | matches!(from_type, NodeType::Server)
                         {
-                            self.add_edge_if_not_already_in(*id, from_id, DEFAULT_PDR);
+                            self.add_new_edge(*id, from_id, DEFAULT_PDR);
                         } else if matches!(node_type, NodeType::Client)
                             | matches!(node_type, NodeType::Server)
                         {
-                            self.add_edge_if_not_already_in(from_id, *id, DEFAULT_PDR);
+                            self.add_new_edge(from_id, *id, DEFAULT_PDR);
                         } else {
-                            self.add_edge_if_not_already_in(from_id, *id, DEFAULT_PDR);
-                            self.add_edge_if_not_already_in(*id, from_id, DEFAULT_PDR);
+                            self.add_new_edge(from_id, *id, DEFAULT_PDR);
+                            self.add_new_edge(*id, from_id, DEFAULT_PDR);
                         }
                     }
 
@@ -742,7 +744,6 @@ impl WebBrowser {
             unreachable!()
         }
     }
-
 
     fn handle_ack(&mut self, packet: Packet, ack: &Ack) {
         if !self.client_is_destination(&packet) {
@@ -856,7 +857,9 @@ impl WebBrowser {
 
                         // update edges weight
                         if let NackType::Dropped = nack.nack_type {
-                            if let Some(header) = self.routing_header_history.remove(&PacketId::from_u64(packet.session_id))
+                            if let Some(header) = self
+                                .routing_header_history
+                                .remove(&PacketId::from_u64(packet.session_id))
                             {
                                 if let Some(source) = packet.routing_header.source() {
                                     self.update_pdr_after_nack(&header, source);
@@ -929,6 +932,7 @@ impl WebBrowser {
         }
     }
 
+    // TESTED
     fn complete_request_with_generic_response(
         &mut self,
         server_id: NodeId,
@@ -975,6 +979,7 @@ impl WebBrowser {
         }
     }
 
+    // TESTED
     fn complete_request_with_text_response(
         &mut self,
         server_id: NodeId,
@@ -1068,6 +1073,7 @@ impl WebBrowser {
         }
     }
 
+    // TESTED
     fn complete_request_with_media_response(
         &mut self,
         server_id: NodeId,
@@ -1076,7 +1082,7 @@ impl WebBrowser {
     ) {
         match resp {
             MediaResponse::MediaList(file_list) => {
-                // for every needed file, remove the sender to the request left
+                // for every needed file, remove the media server from file's list of requests
                 for either in &mut self.media_file_either_owner_or_request_left.values_mut() {
                     if let Either::Right(media_server_list) = either {
                         if let Some(idx) = media_server_list.iter().position(|id| *id == server_id)
@@ -1092,20 +1098,22 @@ impl WebBrowser {
                 // for every file in the list *that is needed*, if owner not set, set it and create request
                 // else, do nothing (the file is arriving)
                 for media_path in file_list {
-                    if self
+                    let file_is_needed = self
                         .text_media_map
                         .values()
-                        .any(|v| v.contains(&media_path))
-                        && !self
-                            .media_file_either_owner_or_request_left
-                            .get(&media_path)
-                            .is_some_and(|either| {
-                                if let Either::Left(owner) = either {
-                                    return owner.is_some();
-                                }
-                                false
-                            })
-                    {
+                        .any(|v| v.contains(&media_path));
+
+                    let owner_is_set = self
+                        .media_file_either_owner_or_request_left
+                        .get(&media_path)
+                        .is_some_and(|either| {
+                            if let Either::Left(owner) = either {
+                                return owner.is_some();
+                            }
+                            false
+                        });
+
+                    if file_is_needed && !owner_is_set {
                         self.media_file_either_owner_or_request_left
                             .insert(media_path.clone(), Either::Left(Some(server_id)));
                         self.create_request(RequestType::Media(media_path, server_id));
@@ -1166,8 +1174,8 @@ impl WebBrowser {
         match command {
             WebClientCommand::AddSender(id, sender) => {
                 self.packet_send.insert(id, sender);
-                self.add_edge_if_not_already_in(self.id, id, DEFAULT_PDR);
-                self.add_edge_if_not_already_in(id, self.id, DEFAULT_PDR);
+                self.add_new_edge(self.id, id, DEFAULT_PDR);
+                self.add_new_edge(id, self.id, DEFAULT_PDR);
                 self.start_flooding();
             }
 
@@ -1212,6 +1220,7 @@ impl WebBrowser {
         }
     }
 
+    // TESTED
     fn add_request(
         &mut self,
         server_id: NodeId,
@@ -1257,6 +1266,7 @@ impl WebBrowser {
         self.packet_id_counter.increment_request_id();
     }
 
+    // TESTED
     fn create_request(&mut self, request_type: RequestType) {
         let compression: Compression; // TODO has to be chosen by scl or randomically
 
