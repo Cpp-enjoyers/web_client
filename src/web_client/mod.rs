@@ -35,14 +35,11 @@ mod test;
 #[cfg(test)]
 mod utils_for_test;
 
-/*
-    Default value put inside an edge in the topology graph
-*/
+
+// Default value put inside an edge in the topology graph
 const DEFAULT_WEIGHT: f64 = 0.5;
 
-/*
-    Enum to identify a node's type inside the topology
-*/
+// represents a node's type
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GraphNodeType {
     TextServer,
@@ -70,10 +67,8 @@ impl From<NodeType> for GraphNodeType {
         }
     }
 }
-/*
-    common trait that represents the capability of fragment an object.
-    i.e. to split it in WG Fragments
-*/
+
+// trait that represents the capability of fragmenting an object. (i.e. to split it in WG Fragments)
 trait Fragmentable: Serializable {
     fn fragment(&self) -> Result<Vec<Fragment>, SerializationError>;
 
@@ -213,9 +208,9 @@ impl Fragmentable for ResponseMessage {
     }
 }
 
-/*
-    enum that represents all the requests that the web client can accept
-*/
+
+// represents all the request types that the web client can accept
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RequestType {
     TextList(NodeId),
@@ -226,18 +221,25 @@ enum RequestType {
 }
 
 /*
-    Struct that represent a request created the client.
-    It keeps track of packet that have been sent and are waiting for tha ACK
-    and also of the packet that compose the response from the server
+    Represent a request created by the client.
+    It keeps track of the packets that have been sent and are waiting for tha ACK
+    and also of the packets that compose the response from the server
 */
 #[derive(Debug, Clone, PartialEq)]
 struct WebBrowserRequest {
+    // Requets's ID
     request_id: RequestId,
+    // Destination's ID
     server_id: NodeId,
-    waiting_for_ack: HashMap<PacketId, Fragment>, // stores the outgoing fragments that are still waiting for ACK
-    incoming_messages: Vec<Fragment>, // stores the incoming fragments that compose the response of the query
+    // stores the outgoing fragments that are still waiting for ACK
+    waiting_for_ack: HashMap<PacketId, Fragment>,
+    // stores the incoming fragments that compose the response of the query
+    incoming_messages: Vec<Fragment>,
+    // compression type of the response
     compression: Compression,
+    // request's type
     request_type: RequestType,
+    // set to true when all of the response's fragments have been received
     response_is_complete: bool,
 }
 impl WebBrowserRequest {
@@ -259,44 +261,69 @@ impl WebBrowserRequest {
         }
     }
 }
-/*
+/**
     Struct that represent the web client
 
-    pending_requests: array of requests that the client is waiting to complete
-    packet_id_counter: incremental id that embed both the requestID and the packetID. This is used to easily handle the WG's sessionID
-    topology_graph: Directed graph that represents the topology. To avoid client/servers being in the middle of a path, this stores only edges outgoing from clients/servers
-    nodes_type: keeps track of each node's type,
-    packets_to_bo_sent_again: stores the outgoing packets for which I couldn't find a path or I received a NACK back instead of ACK. They need to be sent again
-    text_media_map: links a text filename and the nodeId that provided it to the media filenames that it requires
-    stored_files: stores the text/media file that are needed by an open request
-    media_file_either_owner_or_request_left: for every media file store either the owner or the list of media servers that still need to respond to the file list request
-    packets_sent_counter: it keeps track the number of packets (sent, lost) through every drone, used to calculate edge weight in the graph
-    routing_header_history: it kkeps track of the route of each packet until ack or nack are received, in order to correctly handle packets_sent_counter
+    When the scl asks for a text file, the client downloads it from the server, performs a parsing
+    to understand if media files are linked inside it and, if necessary, retrieves them from the correct server.
+    If some media are unavailable, the text file and the available media are sent anyways.
 
+    The topology is stored inside a graph structure. The client tries to estimate the PDR of every drone
+    in order to choose the best path for each message
+
+    The client can ask for compresed or uncompressed data. Together with the web servers, it implements 2 different compression algorithms:
+    - LZW
+    - Huffman
 */
 #[derive(Debug)]
 pub struct WebBrowser {
+    // web client's ID in the network
     id: NodeId,
+    // prefix for logs with node ID
     log_prefix: String,
+    // channel to scl
     controller_send: Sender<WebClientEvent>,
+    // channel from scl
     controller_recv: Receiver<WebClientCommand>,
+    // channel to myself
     packet_recv: Receiver<Packet>,
+    // channles to my direct neighbors
     packet_send: HashMap<NodeId, Sender<Packet>>,
+    // stores the floodIDs of received floods initiated by a certain drone
     flood_history: HashMap<NodeId, RingBuffer<u64>>,
+    // id used to generate my floods
     sequential_flood_id: u64,
+    // array of requests that the client is waiting to complete
     pending_requests: Vec<WebBrowserRequest>,
+    // incremental id that embeds both the requestID and the packetID. This is used to easily handle the WG's sessionID
     packet_id_counter: PacketId,
+    // Directed graph that represents the topology. To avoid client/servers being in the middle of a path, this stores only edges outgoing from clients/servers
     topology_graph: DiGraphMap<NodeId, f64>,
+    // keeps track of each node's type
     nodes_type: HashMap<NodeId, GraphNodeType>,
+    // stores the outgoing packets for which I couldn't find a path or I received a NACK back. They need to be sent again
     packets_to_bo_sent_again: VecDeque<(PacketId, Fragment)>,
+    // links a text filename and the nodeId that provided it to the media filenames that it requires
     text_media_map: HashMap<(NodeId, String), Vec<String>>,
+    // stores the text/media file that are needed by an open request
     stored_files: HashMap<String, Vec<u8>>,
+    // stores either the media's owner or the list of media servers that still need to respond to the file list request
     media_file_either_owner_or_request_left: HashMap<String, Either<Option<NodeId>, Vec<NodeId>>>,
+    // keeps track the number of packets (sent, lost) through every drone. Used to calculate edge weight in the graph
     packets_sent_counter: HashMap<NodeId, (f64, f64)>,
+    // keeps track of the path of each packet until ack or nack are received, in order to correctly handle packets_sent_counter
     routing_header_history: HashMap<PacketId, SourceRoutingHeader>,
 }
 
 impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
+    /**
+        Web client's constructor
+        - id: Client's ID in the network
+        - controller_send: Channel towards the scl
+        - controller_recv: Channel from the scl
+        - packet_recv: Channel to myself, used to listen for packets
+        - packet_send: Hashmap that links each neighbor's ID woth its channel
+    */
     fn new(
         id: NodeId,
         controller_send: Sender<WebClientEvent>,
@@ -315,7 +342,7 @@ impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
 
         Self {
             id,
-            log_prefix: format!("Web Client[{}]", id),
+            log_prefix: format!("Web Client[{id}]"),
             controller_send,
             controller_recv,
             packet_recv,
@@ -335,20 +362,23 @@ impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
         }
     }
 
-    /*
-        at each iteration it checks if there is request ready to be completed
-        and it tries also to resend a packet in the queue, then it listens for a message
-     */
+    /**
+        Core function that "turns on" the client.
+
+        This puts the client in an infinite loop where it reads messages from both scl and neighbors.
+        at each iteration it also looks for a pending request that is ready to be completed and it tries
+        to send again a packet that has not been acknowledged.
+    */
     fn run(&mut self) {
         info!(target: &self.log_prefix, "Web client is running");
         sleep(time::Duration::from_millis(100));
         self.start_flooding();
 
         loop {
-            // complete request
+            // look for a complete request and, if found, finalize it
             self.try_complete_request();
 
-            // try sending a packet that received a NACK
+            // try sending again a packet that received a NACK
             self.try_resend_packet();
 
             select_biased! {
@@ -368,10 +398,7 @@ impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
 }
 
 impl WebBrowser {
-
-    /*
-        takes the client event as a parameter and sends it to the scl
-     */
+    // takes a client event as a parameter and sends it to the scl
     fn internal_send_to_controller(&self, msg: WebClientEvent) {
         if let Err(e) = self.controller_send.send(msg.clone()) {
             error!(target: &self.log_prefix, "internal_send_to_controller: Cannot send message to scl: {e:?}");
@@ -380,9 +407,7 @@ impl WebBrowser {
         }
     }
 
-    /*
-        
-     */
+    // if the first packet in the queue can be sent again it sends it, otherwise it pushes it at the end of the queue
     fn try_resend_packet(&mut self) {
         if let Some((id, frag)) = self.packets_to_bo_sent_again.pop_front() {
             if let Some(req) = self
@@ -398,6 +423,7 @@ impl WebBrowser {
 
                 match self.try_send_packet(packet, req.server_id) {
                     Ok(packet_sent) => {
+                        // store the header in order to correctly update the packet_sent_counter
                         self.routing_header_history.insert(
                             PacketId::from_u64(packet_sent.session_id),
                             packet_sent.routing_header.clone(),
@@ -419,6 +445,9 @@ impl WebBrowser {
         }
     }
 
+    // search for a request that is ready to be completed and finilises it.
+    // it also searches for a text file that has received all the media files
+    // and sends the result to scl
     fn try_complete_request(&mut self) {
         if let Some(i) = self
             .pending_requests
@@ -436,6 +465,7 @@ impl WebBrowser {
             .iter()
             .find(|(_, list)| {
                 for f in *list {
+                    // owner can still be discovered if media_file_either_owner_or_request_left contains a non-empty list of media servers
                     let owner_can_still_be_discovered = self
                         .media_file_either_owner_or_request_left
                         .get(f)
@@ -448,7 +478,7 @@ impl WebBrowser {
 
                     let media_is_already_stored = self.stored_files.contains_key(f);
 
-                    let owner_is_in_the_graph = self
+                    let owner_is_available = self
                         .media_file_either_owner_or_request_left
                         .get(f)
                         .is_some_and(|either| {
@@ -459,7 +489,7 @@ impl WebBrowser {
                         });
 
                     if !media_is_already_stored
-                        && (owner_can_still_be_discovered || owner_is_in_the_graph)
+                        && (owner_can_still_be_discovered || owner_is_available)
                     {
                         return false;
                     }
@@ -473,12 +503,12 @@ impl WebBrowser {
         }
     }
 
+    // given a key for text_media_map, it retrieves the text file and the related media and sends everything to scl
     fn send_text_and_media_back(&mut self, key: &(NodeId, String)) {
         if let Some(media_list) = self.text_media_map.remove(key) {
-            // ! unwrap of the text file must work
             let html_file = (
                 get_filename_from_path(&key.1),
-                self.stored_files.remove(&key.1).unwrap(),
+                self.stored_files.remove(&key.1).unwrap_or(vec![]),
             );
             let mut media_files = vec![];
 
@@ -493,6 +523,11 @@ impl WebBrowser {
                     .remove(&media_full_name);
             }
 
+            if html_file.1.is_empty(){
+                error!(target: &self.log_prefix, "send_text_and_media_back: The text file {} was not correctly stored, the entire request has to be dropped", key.1);
+                return;
+            }
+
             info!(target: &self.log_prefix, "send_text_and_media_back: Sending to scl the text file {:?} and all its needed media {:?}", html_file, media_files);
 
             self.internal_send_to_controller(WebClientEvent::FileFromClient(
@@ -502,6 +537,7 @@ impl WebBrowser {
         }
     }
 
+    // the given packet is shortcutted to the scl
     fn shortcut(&self, packet: Packet) {
         match packet.routing_header.destination() {
             Some(_) => {
@@ -513,6 +549,8 @@ impl WebBrowser {
         }
     }
 
+    // it tries to send the packet p to the node whose ID is dest
+    // an error is returned if the channel for the first hop is not available or a path does not exist
     fn try_send_packet(&self, p: Packet, dest: NodeId) -> Result<Packet, Box<SendError<Packet>>> {
         let mut final_packet: Packet;
         let opt_chn: Option<&Sender<Packet>>;
@@ -551,9 +589,10 @@ impl WebBrowser {
         }
     }
 
-    fn is_correct_server_type(&self, server_id: NodeId, requested_type: &GraphNodeType) -> bool {
+    // checks that node_id's type is equal to requested_type
+    fn is_correct_server_type(&self, node_id: NodeId, requested_type: &GraphNodeType) -> bool {
         self.nodes_type
-            .get(&server_id)
+            .get(&node_id)
             .is_some_and(|t| t == requested_type)
     }
 
@@ -599,18 +638,21 @@ impl WebBrowser {
         (packet, None)
     }
 
+    // checks that this web client is the destination of packet p
     fn client_is_destination(&self, p: &Packet) -> bool {
         p.routing_header
             .destination()
             .is_some_and(|dest| dest == self.id)
     }
 
+    // given a packet p, it retrieves the position of the corresponding request inside the pending_request array
     fn get_request_index(&self, p: &Packet) -> Option<usize> {
         self.pending_requests
             .iter()
             .position(|req| req.request_id == PacketId::from_u64(p.session_id).get_request_id())
     }
 
+    // adds the edge directed (from, to, weight) to the graph only if it doesn't already exist
     fn add_new_edge(&mut self, from: NodeId, to: NodeId, weight: f64) {
         if !self.topology_graph.contains_edge(from, to) {
             self.topology_graph.add_edge(from, to, weight);
@@ -618,6 +660,7 @@ impl WebBrowser {
         }
     }
 
+    // removes the node "node_to_remove" from graph and also from nodes_type and packet_sent_counter to keep consistency between the data structures
     fn remove_node(&mut self, node_to_remove: NodeId) {
         if self
             .nodes_type
@@ -631,6 +674,8 @@ impl WebBrowser {
         }
     }
 
+    // updates the weight of every incoming edge from the node "drone_id"
+    // the used metric is 1 / (1 - (lost / sent))
     fn update_graph_weight(&mut self, drone_id: NodeId) {
         let new_weight = self
             .packets_sent_counter
@@ -647,7 +692,12 @@ impl WebBrowser {
         }
     }
 
-    fn update_packet_counter_after_nack(
+    // when a nack::dropped is received, the packet counter and graph are updated to take into account this error:
+    // every node from myself to the problematic_node that dropped the message gets +1 to the counter of sent message
+    // the drone that has dropped it gets +1 to both sent and lost messages.
+    // finally, the graph is updated with the new weights
+    // header contains the path that the packet travelled from me to problematic_node
+    fn update_packet_counter_nack_dropped(
         &mut self,
         header: &SourceRoutingHeader,
         problematic_node: NodeId,
@@ -660,6 +710,8 @@ impl WebBrowser {
             self.packets_sent_counter
                 .entry(*id)
                 .and_modify(|(sent, _)| *sent += 1.);
+
+            self.update_graph_weight(*id);
 
             info!(target: &self.log_prefix, "update_packet_counter_after_nack: Updating sent counter of {id}");
         }
@@ -675,7 +727,11 @@ impl WebBrowser {
         self.update_graph_weight(problematic_node);
     }
 
-    fn update_packet_counter_after_ack(&mut self, header: &SourceRoutingHeader) {
+    // when an ack, the packet counter and graph are updated to take into account this event:
+    // every node inside the path gets +1 to the counter of sent message
+    // finally, the graph is updated with the new weights
+    // header contains the path that the packet travelled from me to destination
+    fn update_packet_counter_ack(&mut self, header: &SourceRoutingHeader) {
         for drone_id in &header.hops {
             self.packets_sent_counter
                 .entry(*drone_id)
@@ -687,6 +743,9 @@ impl WebBrowser {
         }
     }
 
+    // if the flood response is mine and is not old, the graph can be updated
+    // to make simpler the path finding procedure, the graph is directed and each client/server
+    // have only outgoing edges (they are sink of the graph), in this way the path cannot go trough clients/servers
     fn handle_flood_response(&mut self, packet: Packet, resp: &FloodResponse) {
         let initiator: Option<&(NodeId, NodeType)> = resp.path_trace.first();
 
@@ -703,28 +762,28 @@ impl WebBrowser {
             info!(target: &self.log_prefix, "handle_flood_response: Received a flood response, updating graph...");
 
             let mut prev: Option<(NodeId, NodeType)> = None;
-            for (id, node_type) in &resp.path_trace {
+            for (to_id, to_type) in &resp.path_trace {
                 if let Some((from_id, from_type)) = prev {
-                    if *id == self.id || from_id == self.id {
-                        self.add_new_edge(from_id, *id, DEFAULT_WEIGHT);
-                        self.add_new_edge(*id, from_id, DEFAULT_WEIGHT);
+                    if *to_id == self.id || from_id == self.id {
+                        self.add_new_edge(from_id, *to_id, DEFAULT_WEIGHT);
+                        self.add_new_edge(*to_id, from_id, DEFAULT_WEIGHT);
                     } else {
                         // this prevents A* to find path with client/server in the middle
                         if matches!(from_type, NodeType::Client)
                             | matches!(from_type, NodeType::Server)
                         {
-                            self.add_new_edge(*id, from_id, DEFAULT_WEIGHT);
-                        } else if matches!(node_type, NodeType::Client)
-                            | matches!(node_type, NodeType::Server)
+                            self.add_new_edge(*to_id, from_id, DEFAULT_WEIGHT);
+                        } else if matches!(to_type, NodeType::Client)
+                            | matches!(to_type, NodeType::Server)
                         {
-                            self.add_new_edge(from_id, *id, DEFAULT_WEIGHT);
+                            self.add_new_edge(from_id, *to_id, DEFAULT_WEIGHT);
                         } else {
-                            self.add_new_edge(from_id, *id, DEFAULT_WEIGHT);
-                            self.add_new_edge(*id, from_id, DEFAULT_WEIGHT);
+                            self.add_new_edge(from_id, *to_id, DEFAULT_WEIGHT);
+                            self.add_new_edge(*to_id, from_id, DEFAULT_WEIGHT);
                         }
                     }
 
-                    self.nodes_type.insert(*id, (*node_type).into());
+                    self.nodes_type.insert(*to_id, (*to_type).into());
 
                     // initialize the packet counter
                     for (drone_id, _) in self
@@ -737,7 +796,7 @@ impl WebBrowser {
                         }
                     }
                 }
-                prev = Some((*id, *node_type));
+                prev = Some((*to_id, *to_type));
             }
         } else if let Some(next_hop_drone_id) = packet.routing_header.next_hop() {
             if let Err(e) = self.try_send_packet(packet, next_hop_drone_id) {
@@ -751,6 +810,8 @@ impl WebBrowser {
         }
     }
 
+    // if the ack is for me, search for the corresponding request and remove the packet from the waiting_for_ack list
+    // and update packet_set_counter
     fn handle_ack(&mut self, packet: Packet) {
         if !self.client_is_destination(&packet) {
             error!(target: &self.log_prefix, "handle_ack: Received an ack that is not for me, shortcut");
@@ -764,7 +825,7 @@ impl WebBrowser {
                 let packet_id = PacketId::from_u64(packet.session_id);
                 if req.waiting_for_ack.remove(&packet_id).is_some() {
                     if let Some(header) = self.routing_header_history.remove(&packet_id) {
-                        self.update_packet_counter_after_ack(&header);
+                        self.update_packet_counter_ack(&header);
                         info!(target: &self.log_prefix, "handle_ack: ack correctly elaborated {packet:?}");
                     }
                 } else {
@@ -777,6 +838,8 @@ impl WebBrowser {
         }
     }
 
+    // if the fragment is for me, find the corresponding request and store packet fragmetn inside the response array
+    // and send the ack back to the server
     fn handle_fragment(&mut self, packet: Packet, fragment: &Fragment) {
         if !self.client_is_destination(&packet) {
             error!(target: &self.log_prefix, "handle_fragment: Received a fragment that is not for me, shortcut");
@@ -830,6 +893,9 @@ impl WebBrowser {
         }
     }
 
+    // if the nack is for me, I need to resend a packet. If the nack is dropped or destinationIsDrone, I can just recalculate the path and, if found, send it again.
+    // otherwise I remove the node that is creating problems and then I search a path and send the packet.
+    // In both cases, if the path is not found, I push the packet inside the queue of packets to be sent again and I start a new flood request.
     fn handle_nack(&mut self, packet: Packet, nack: &Nack) {
         if !self.client_is_destination(&packet) {
             error!(target: &self.log_prefix, "handle_nack: Received a nack that is not for me, shortcut");
@@ -862,7 +928,7 @@ impl WebBrowser {
                         if let NackType::Dropped = nack.nack_type {
                             if let Some(header) = original_header {
                                 if let Some(source) = packet.routing_header.source() {
-                                    self.update_packet_counter_after_nack(&header, source);
+                                    self.update_packet_counter_nack_dropped(&header, source);
                                 }
                             }
                         }
@@ -894,6 +960,7 @@ impl WebBrowser {
         }
     }
 
+    // given a packet, it calls the correct function based on packet's type
     fn handle_packet(&mut self, packet: Packet) {
         info!(target: &self.log_prefix, "handle_packet: handling packet with ID: {}", packet.session_id);
 
@@ -921,6 +988,7 @@ impl WebBrowser {
         }
     }
 
+    
     fn complete_request_with_generic_response(
         &mut self,
         server_id: NodeId,

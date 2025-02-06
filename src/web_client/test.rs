@@ -44,14 +44,10 @@ mod web_client_tests {
             self, Compression, GenericResponse, MediaResponse, RequestMessage, ResponseMessage,
             TextResponse,
         },
-        Client,
     };
     use itertools::Either;
     use std::vec;
-    use std::{
-        collections::{HashMap, VecDeque},
-        env,
-    };
+    use std::collections::{HashMap, VecDeque};
     use wg_2024::{
         network::SourceRoutingHeader,
         packet::{Ack, FloodRequest, Fragment, Nack, NackType, NodeType, Packet, PacketType},
@@ -589,37 +585,37 @@ mod web_client_tests {
         let header = SourceRoutingHeader::new(vec![1, 11, 12], 0);
 
         client.packets_sent_counter.insert(11, (0., 0.));
-        client.update_packet_counter_after_ack(&header);
+        client.update_packet_counter_ack(&header);
         assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(1., 0.));
         assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &1.);
 
-        client.update_packet_counter_after_nack(&header, 11);
+        client.update_packet_counter_nack_dropped(&header, 11);
         assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(2., 1.));
         assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &2.);
 
-        client.update_packet_counter_after_ack(&header);
-        client.update_packet_counter_after_ack(&header);
+        client.update_packet_counter_ack(&header);
+        client.update_packet_counter_ack(&header);
         assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(4., 1.));
         assert_eq!(
             client.topology_graph.edge_weight(1, 11).unwrap(),
             &(4. / 3.)
         );
 
-        client.update_packet_counter_after_ack(&header);
-        client.update_packet_counter_after_nack(&header, 11);
-        client.update_packet_counter_after_nack(&header, 11);
-        client.update_packet_counter_after_nack(&header, 11);
+        client.update_packet_counter_ack(&header);
+        client.update_packet_counter_nack_dropped(&header, 11);
+        client.update_packet_counter_nack_dropped(&header, 11);
+        client.update_packet_counter_nack_dropped(&header, 11);
         assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(8., 4.));
         assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &2.);
 
         for _ in 0..8 {
-            client.update_packet_counter_after_nack(&header, 11);
+            client.update_packet_counter_nack_dropped(&header, 11);
         }
         assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(16., 12.));
         assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &4.);
 
         *client.packets_sent_counter.get_mut(&11).unwrap() = (0., 0.);
-        client.update_packet_counter_after_nack(&header, 11);
+        client.update_packet_counter_nack_dropped(&header, 11);
         assert!(client
             .topology_graph
             .edge_weight(1, 11)
