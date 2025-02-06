@@ -317,10 +317,10 @@ impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
     /**
         Web client's constructor
         - id: Client's ID in the network
-        - controller_send: Channel towards the scl
-        - controller_recv: Channel from the scl
-        - packet_recv: Channel to myself, used to listen for packets
-        - packet_send: Hashmap that links each neighbor's ID woth its channel
+        - `controller_send`: Channel towards the scl
+        - `controller_recv`: Channel from the scl
+        - `packet_recv`: Channel to myself, used to listen for packets
+        - `packet_send`: Hashmap that links each neighbor's ID woth its channel
     */
     fn new(
         id: NodeId,
@@ -397,7 +397,7 @@ impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
 
 impl WebBrowser {
     // takes a client event as a parameter and sends it to the scl
-    fn internal_send_to_controller(&self, msg: WebClientEvent) {
+    fn internal_send_to_controller(&self, msg: &WebClientEvent) {
         if let Err(e) = self.controller_send.send(msg.clone()) {
             error!(target: &self.log_prefix, "internal_send_to_controller: Cannot send message to scl: {e:?}");
         } else {
@@ -506,7 +506,7 @@ impl WebBrowser {
         if let Some(media_list) = self.text_media_map.remove(key) {
             let html_file = (
                 get_filename_from_path(&key.1),
-                self.stored_files.remove(&key.1).unwrap_or(vec![]),
+                self.stored_files.remove(&key.1).unwrap_or_default(),
             );
             let mut media_files = vec![];
 
@@ -528,7 +528,7 @@ impl WebBrowser {
 
             info!(target: &self.log_prefix, "send_text_and_media_back: Sending to scl the text file {:?} and all its needed media {:?}", html_file, media_files);
 
-            self.internal_send_to_controller(WebClientEvent::FileFromClient(
+            self.internal_send_to_controller(&WebClientEvent::FileFromClient(
                 TextMediaResponse::new(html_file, media_files),
                 key.0,
             ));
@@ -539,7 +539,7 @@ impl WebBrowser {
     fn shortcut(&self, packet: Packet) {
         match packet.routing_header.destination() {
             Some(_) => {
-                self.internal_send_to_controller(WebClientEvent::Shortcut(packet));
+                self.internal_send_to_controller(&WebClientEvent::Shortcut(packet));
             }
             None => {
                 error!(target: &self.log_prefix, "shortcut: Packet doesn't contain a destination, it's pointless to shortcut, dropping");
@@ -575,7 +575,7 @@ impl WebBrowser {
                 return Err(Box::new(e));
             }
 
-            self.internal_send_to_controller(WebClientEvent::PacketSent(final_packet.clone()));
+            self.internal_send_to_controller(&WebClientEvent::PacketSent(final_packet.clone()));
 
             info!(target: &self.log_prefix, "try_send_packet: Packet correctly sent the packet with ID: {} to {dest}", final_packet.session_id);
 
@@ -1024,11 +1024,11 @@ impl WebBrowser {
                         }
                     }
                     info!(target: &self.log_prefix, "complete_request_with_generic_response: Sending the server type's list to scl");
-                    self.internal_send_to_controller(WebClientEvent::ServersTypes(list));
+                    self.internal_send_to_controller(&WebClientEvent::ServersTypes(list));
                 }
             }
             GenericResponse::InvalidRequest | GenericResponse::NotFound => {
-                self.internal_send_to_controller(WebClientEvent::UnsupportedRequest);
+                self.internal_send_to_controller(&WebClientEvent::UnsupportedRequest);
             }
         }
     }
@@ -1047,7 +1047,7 @@ impl WebBrowser {
         match resp {
             TextResponse::TextList(vec) => {
                 info!(target: &self.log_prefix, "complete_request_with_text_response: Sending text file list to scl: {{{vec:?}}}");
-                self.internal_send_to_controller(WebClientEvent::ListOfFiles(vec, server_id));
+                self.internal_send_to_controller(&WebClientEvent::ListOfFiles(vec, server_id));
             }
             TextResponse::Text(file) => {
                 let RequestType::Text(text_path, _) = request_type else {
@@ -1061,7 +1061,7 @@ impl WebBrowser {
 
                 if needed_media.is_empty() {
                     info!(target: &self.log_prefix, "complete_request_with_text_response: The text file \"{text_path}\" doesn't need any media file, sending it to scl");
-                    self.internal_send_to_controller(WebClientEvent::FileFromClient(
+                    self.internal_send_to_controller(&WebClientEvent::FileFromClient(
                         TextMediaResponse::new(
                             (get_filename_from_path(&text_path), file),
                             Vec::new(),
@@ -1337,7 +1337,7 @@ impl WebBrowser {
             RequestType::TextList(server_id) => {
                 if !self.is_correct_server_type(*server_id, &GraphNodeType::TextServer) {
                     info!(target: &self.log_prefix, "create_request: The request type \"{request_type:?}\"is incompatible with the destination's type");
-                    self.internal_send_to_controller(WebClientEvent::UnsupportedRequest);
+                    self.internal_send_to_controller(&WebClientEvent::UnsupportedRequest);
                     return;
                 }
                 dest = *server_id;
@@ -1355,7 +1355,7 @@ impl WebBrowser {
             RequestType::MediaList(server_id) => {
                 if !self.is_correct_server_type(*server_id, &GraphNodeType::MediaServer) {
                     info!(target: &self.log_prefix, "create_request: The request type \"{request_type:?}\"is incompatible with the destination's type");
-                    self.internal_send_to_controller(WebClientEvent::UnsupportedRequest);
+                    self.internal_send_to_controller(&WebClientEvent::UnsupportedRequest);
                     return;
                 }
                 dest = *server_id;
@@ -1399,7 +1399,7 @@ impl WebBrowser {
                 compression = Compression::None;
                 if !self.is_correct_server_type(*server_id, &GraphNodeType::MediaServer) {
                     info!(target: &self.log_prefix, "create_request: The request type \"{request_type:?}\"is incompatible with the destination's type");
-                    self.internal_send_to_controller(WebClientEvent::UnsupportedRequest);
+                    self.internal_send_to_controller(&WebClientEvent::UnsupportedRequest);
                     return;
                 }
                 dest = *server_id;
@@ -1418,7 +1418,7 @@ impl WebBrowser {
                 compression = Compression::LZW;
                 if !self.is_correct_server_type(*server_id, &GraphNodeType::TextServer) {
                     info!(target: &self.log_prefix, "create_request: The request type \"{request_type:?}\"is incompatible with the destination's type");
-                    self.internal_send_to_controller(WebClientEvent::UnsupportedRequest);
+                    self.internal_send_to_controller(&WebClientEvent::UnsupportedRequest);
                     return;
                 }
                 dest = *server_id;

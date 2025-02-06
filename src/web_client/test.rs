@@ -280,10 +280,10 @@ mod client_tests {
     fn complete_request_with_media_response() {
         let (
             mut client,
-            (_c_send, _c_recv),
-            (_s_send, s_recv),
-            (_c_command_send, _c_command_recv),
-            (_c_event_send, c_event_recv),
+            (_, _),
+            (_, _),
+            (_, _),
+            (_, _),
         ) = client_with_graph_and_nodes_type(
             DiGraphMap::new(),
             HashMap::from([
@@ -338,9 +338,9 @@ mod client_tests {
     fn complete_request_with_text_response() {
         let (
             mut client,
-            (_c_send, _c_recv),
-            (_s_send, s_recv),
-            (_c_command_send, _c_command_recv),
+            (_, _),
+            (_, _),
+            (_, _),
             (_c_event_send, c_event_recv),
         ) = client_with_graph_and_nodes_type(
             DiGraphMap::new(),
@@ -389,9 +389,9 @@ mod client_tests {
     fn complete_request_with_generic_response() {
         let (
             mut client,
-            (_c_send, _c_recv),
-            (_s_send, s_recv),
-            (_c_command_send, _c_command_recv),
+            (_, _),
+            (_, _),
+            (_, _),
             (_c_event_send, c_event_recv),
         ) = client_with_graph_and_nodes_type(
             DiGraphMap::new(),
@@ -555,10 +555,10 @@ mod client_tests {
     fn is_correct_server_type() {
         let (
             client,
-            (_c_send, _c_recv),
-            (_s_send, s_recv),
-            (_c_command_send, _c_command_recv),
-            (_c_event_send, c_event_recv),
+            (_, _),
+            (_, _),
+            (_, _),
+            (_, _),
         ) = client_with_graph_and_nodes_type(
             DiGraphMap::new(),
             HashMap::from([(1, GraphNodeType::Client), (12, GraphNodeType::Drone)]),
@@ -1755,7 +1755,7 @@ mod client_tests {
                 ]),
             );
 
-        client.internal_send_to_controller(WebClientEvent::UnsupportedRequest);
+        client.internal_send_to_controller(&WebClientEvent::UnsupportedRequest);
         assert_eq!(
             c_event_recv.recv().unwrap(),
             WebClientEvent::UnsupportedRequest
