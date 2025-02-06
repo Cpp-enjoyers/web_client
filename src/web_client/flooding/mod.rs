@@ -40,6 +40,6 @@ impl Flooder for WebBrowser {
     }
 
     fn send_to_controller(&self, p: Packet) {
-        self.internal_send_to_controller(WebClientEvent::Shortcut(p));
+        self.internal_send_to_controller(WebClientEvent::PacketSent(p));
     }
 }
