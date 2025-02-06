@@ -35,7 +35,6 @@ mod test;
 #[cfg(test)]
 mod utils_for_test;
 
-
 // Default value put inside an edge in the topology graph
 const DEFAULT_WEIGHT: f64 = 0.5;
 
@@ -207,7 +206,6 @@ impl Fragmentable for ResponseMessage {
         Self::deserialize(decompressed)
     }
 }
-
 
 // represents all the request types that the web client can accept
 
@@ -523,7 +521,7 @@ impl WebBrowser {
                     .remove(&media_full_name);
             }
 
-            if html_file.1.is_empty(){
+            if html_file.1.is_empty() {
                 error!(target: &self.log_prefix, "send_text_and_media_back: The text file {} was not correctly stored, the entire request has to be dropped", key.1);
                 return;
             }
@@ -988,7 +986,9 @@ impl WebBrowser {
         }
     }
 
-    
+    // handles a generic response: if it's a server type response I store the information inside nodes_type
+    // and, if I discovered all of the servers, it sends to scl the servers list
+    // if it's not a server type response I send to scl an error event
     fn complete_request_with_generic_response(
         &mut self,
         server_id: NodeId,
@@ -1033,6 +1033,10 @@ impl WebBrowser {
         }
     }
 
+    // handles a text response: if it's a text list it sends its content to scl
+    // If it's a text file response it parses it to find media file linked inside it
+    // if none is found, the file is directly sent to scl, otherwise it is stored
+    // and the client asks for the needed file to the media servers
     fn complete_request_with_text_response(
         &mut self,
         server_id: NodeId,
@@ -1078,7 +1082,7 @@ impl WebBrowser {
 
                     // for every media:
                     // if present in cache do nothing
-                    // else, if I know the owner, do nothing (the file is arriving - I have already requeted it when I discovered its owner)
+                    // else, if I know the owner, do nothing (the file is arriving - I have already requested it when I discovered its owner)
                     // else, if remaining list counter is set, do nothing(it's already been asked)
                     // else, set counter and ask media lists
 
@@ -1121,6 +1125,9 @@ impl WebBrowser {
         }
     }
 
+    // handles a media response: if it's a media list it updates the informations about
+    // the media that are currently needed for some text file. If it's a media file response
+    // it stores the file for later usage
     fn complete_request_with_media_response(
         &mut self,
         server_id: NodeId,
@@ -1184,6 +1191,7 @@ impl WebBrowser {
         }
     }
 
+    // completes the request passed as parameter by calling the correct function based on the response's type
     fn complete_request(&mut self, mut req: WebBrowserRequest) {
         info!(target: &self.log_prefix, "complete_request: completing req (id: {:?}, type: {:?}, to: {:?})", req.request_id, req.request_type, req.server_id);
 
@@ -1213,6 +1221,7 @@ impl WebBrowser {
         }
     }
 
+    // handles a command from the scl
     fn handle_command(&mut self, command: WebClientCommand) {
         info!(target: &self.log_prefix, "handle_command: Handling command {command:?}");
 
@@ -1245,6 +1254,7 @@ impl WebBrowser {
         }
     }
 
+    // starts a new flood request with a new flood_id, and it sends it to each of the direct neighbor
     fn start_flooding(&mut self) {
         self.sequential_flood_id += 1;
 
@@ -1265,6 +1275,8 @@ impl WebBrowser {
         }
     }
 
+    // creates the request from the given parameters and tries to send all the fragments to the destination
+    // if an error occurs during the sending, the fragmetn is stored in queue of packets to be sent again
     fn add_request(
         &mut self,
         server_id: NodeId,
@@ -1314,6 +1326,8 @@ impl WebBrowser {
         self.packet_id_counter.increment_request_id();
     }
 
+    // given the parameter request_type, it creates the vector of fragments that compose the request and then if calls
+    // add_request() to sent the fragments and insert the new request inside the pending_request buffer
     fn create_request(&mut self, request_type: RequestType) {
         let compression: Compression;
         let frags: Vec<Fragment>;
@@ -1328,9 +1342,14 @@ impl WebBrowser {
                 }
                 dest = *server_id;
                 compression = Compression::None;
-                frags = web_messages::RequestMessage::new_text_list_request(self.id, compression.clone())
-                        .fragment()
-                        .expect("Error during fragmentation. This can't happen. If it happens there is a bug");
+                frags = web_messages::RequestMessage::new_text_list_request(
+                    self.id,
+                    compression.clone(),
+                )
+                .fragment()
+                .expect(
+                    "Error during fragmentation. This can't happen. If it happens there is a bug",
+                );
             }
 
             RequestType::MediaList(server_id) => {
@@ -1341,10 +1360,14 @@ impl WebBrowser {
                 }
                 dest = *server_id;
                 compression = Compression::None;
-                frags =
-                    web_messages::RequestMessage::new_media_list_request(self.id, compression.clone())
-                        .fragment()
-                        .expect("Error during fragmentation. This can't happen. If it happens there is a bug");
+                frags = web_messages::RequestMessage::new_media_list_request(
+                    self.id,
+                    compression.clone(),
+                )
+                .fragment()
+                .expect(
+                    "Error during fragmentation. This can't happen. If it happens there is a bug",
+                );
             }
 
             RequestType::ServersType => {
@@ -1380,10 +1403,15 @@ impl WebBrowser {
                     return;
                 }
                 dest = *server_id;
-                frags =
-                    web_messages::RequestMessage::new_media_request(self.id, compression.clone(), file_path.clone())
-                        .fragment()
-                        .expect("Error during fragmentation. This can't happen. If it happens there is a bug");
+                frags = web_messages::RequestMessage::new_media_request(
+                    self.id,
+                    compression.clone(),
+                    file_path.clone(),
+                )
+                .fragment()
+                .expect(
+                    "Error during fragmentation. This can't happen. If it happens there is a bug",
+                );
             }
 
             RequestType::Text(file_path, server_id) => {
@@ -1394,10 +1422,15 @@ impl WebBrowser {
                     return;
                 }
                 dest = *server_id;
-                frags =
-                    web_messages::RequestMessage::new_text_request(self.id, compression.clone(), file_path.clone())
-                        .fragment()
-                        .expect("Error during fragmentation. This can't happen. If it happens there is a bug");
+                frags = web_messages::RequestMessage::new_text_request(
+                    self.id,
+                    compression.clone(),
+                    file_path.clone(),
+                )
+                .fragment()
+                .expect(
+                    "Error during fragmentation. This can't happen. If it happens there is a bug",
+                );
             }
         }
         info!(target: &self.log_prefix, "create_request: Creating a new request (to: {dest}, type: {request_type:?}");

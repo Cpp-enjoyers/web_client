@@ -36,7 +36,7 @@ fn simulate_server_compression(before: ResponseMessage) -> Vec<Fragment> {
 }
 
 #[cfg(test)]
-mod web_client_tests {
+mod client_tests {
 
     use common::{
         slc_commands::{ServerType, TextMediaResponse},
@@ -46,8 +46,8 @@ mod web_client_tests {
         },
     };
     use itertools::Either;
-    use std::vec;
     use std::collections::{HashMap, VecDeque};
+    use std::vec;
     use wg_2024::{
         network::SourceRoutingHeader,
         packet::{Ack, FloodRequest, Fragment, Nack, NackType, NodeType, Packet, PacketType},
@@ -70,7 +70,7 @@ mod web_client_tests {
     };
 
     #[test]
-    pub fn handle_ack() {
+    fn handle_ack() {
         let (mut client, (_, _), (_, _), (_, _), (_c_event_send, c_event_recv)) =
             client_with_graph_and_nodes_type(
                 DiGraphMap::new(),
@@ -109,7 +109,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn handle_nack_dropped() {
+    fn handle_nack_dropped() {
         let (mut client, (_, _), (_s_send, s_recv), (_, _), (_c_event_send, c_event_recv)) =
             client_with_graph_and_nodes_type(
                 DiGraphMap::new(),
@@ -164,7 +164,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn handle_nack_error_in_routing() {
+    fn handle_nack_error_in_routing() {
         let (mut client, (_, _), (_s_send, s_recv), (_, _), (_c_event_send, c_event_recv)) =
             client_with_graph_and_nodes_type(
                 DiGraphMap::new(),
@@ -219,7 +219,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn create_request() {
+    fn create_request() {
         let (mut client, (_, _), (_, _), (_, _), (_, _)) = client_with_graph_and_nodes_type(
             DiGraphMap::new(),
             HashMap::from([
@@ -277,7 +277,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn complete_request_with_media_response() {
+    fn complete_request_with_media_response() {
         let (
             mut client,
             (_c_send, _c_recv),
@@ -335,7 +335,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn complete_request_with_text_response() {
+    fn complete_request_with_text_response() {
         let (
             mut client,
             (_c_send, _c_recv),
@@ -386,7 +386,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn complete_request_with_generic_response() {
+    fn complete_request_with_generic_response() {
         let (
             mut client,
             (_c_send, _c_recv),
@@ -398,19 +398,13 @@ mod web_client_tests {
             HashMap::from([(1, GraphNodeType::Client), (2, GraphNodeType::Server)]),
         );
 
-        client.complete_request_with_generic_response(
-            2,
-            &GenericResponse::InvalidRequest,
-        );
+        client.complete_request_with_generic_response(2, &GenericResponse::InvalidRequest);
         assert_eq!(
             c_event_recv.recv().unwrap(),
             WebClientEvent::UnsupportedRequest
         );
 
-        client.complete_request_with_generic_response(
-            2,
-            &GenericResponse::NotFound,
-        );
+        client.complete_request_with_generic_response(2, &GenericResponse::NotFound);
         assert_eq!(
             c_event_recv.recv().unwrap(),
             WebClientEvent::UnsupportedRequest
@@ -428,7 +422,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn add_new_edge() {
+    fn add_new_edge() {
         let (mut client, (_, _), (_, _), (_, _), (_, _)) = client_with_graph_and_nodes_type(
             DiGraphMap::from_edges(COMPLEX_TOPOLOGY),
             HashMap::from([(1, GraphNodeType::Client), (12, GraphNodeType::Drone)]),
@@ -444,7 +438,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn get_request_index() {
+    fn get_request_index() {
         let (mut client, (_, _), (_, _), (_, _), (_, _)) = client_with_graph_and_nodes_type(
             DiGraphMap::from_edges(COMPLEX_TOPOLOGY),
             HashMap::from([(1, GraphNodeType::Client), (12, GraphNodeType::Drone)]),
@@ -490,7 +484,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn client_is_destination() {
+    fn client_is_destination() {
         let (client, (_, _), (_, _), (_, _), (_, _)) = client_with_graph_and_nodes_type(
             DiGraphMap::from_edges(COMPLEX_TOPOLOGY),
             HashMap::from([(1, GraphNodeType::Client), (12, GraphNodeType::Drone)]),
@@ -507,7 +501,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn remove_node() {
+    fn remove_node() {
         let (mut client, (_, _), (_, _), (_, _), (_, _)) = client_with_graph_and_nodes_type(
             DiGraphMap::from_edges(COMPLEX_TOPOLOGY),
             HashMap::from([(1, GraphNodeType::Client), (12, GraphNodeType::Drone)]),
@@ -524,7 +518,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn prepare_packet_routing() {
+    fn prepare_packet_routing() {
         let (
             client,
             (_c_send, _c_recv),
@@ -558,7 +552,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn is_correct_server_type() {
+    fn is_correct_server_type() {
         let (
             client,
             (_c_send, _c_recv),
@@ -576,7 +570,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn graph_weight_update() {
+    fn graph_weight_update() {
         let (mut client, (_, _), (_, _), (_, _), (_, _)) = client_with_graph_and_nodes_type(
             DiGraphMap::from_edges([(1, 11, DEFAULT_WEIGHT), (11, 1, DEFAULT_WEIGHT)]),
             HashMap::from([(1, GraphNodeType::Client)]),
@@ -624,7 +618,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn add_sender() {
+    fn add_sender() {
         let (
             mut client,
             (_c_send, _c_recv),
@@ -651,7 +645,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn remove_sender() {
+    fn remove_sender() {
         let (
             mut client,
             (_c_send, _c_recv),
@@ -678,7 +672,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn file_list_scl_command_1() {
+    fn file_list_scl_command_1() {
         // client 1 <--> 11 <--> 21 server
 
         let (
@@ -776,7 +770,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn command_with_nack() {
+    fn command_with_nack() {
         // client 1 <--> 11 <--> 21 server
 
         let (mut client, (_, _), (_s_send, s_recv), (_, _), (_c_event_send, c_event_recv)) =
@@ -909,7 +903,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn command_with_3_nack() {
+    fn command_with_3_nack() {
         // client 1 <--> 11 <--> 21 server
 
         let (mut client, (_, _), (_s_send, s_recv), (_, _), (_c_event_send, c_event_recv)) =
@@ -1104,7 +1098,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn server_type_request() {
+    fn server_type_request() {
         // client 1 <--> 11 <--> 21 server
 
         let (mut client, (_, _), (_s_send, s_recv), (_, _), (_c_event_send, c_event_recv)) =
@@ -1201,7 +1195,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn file_request_no_media() {
+    fn file_request_no_media() {
         let (mut client, (_, _), (_, _), (_, _), (_c_event_send, c_event_recv)) =
             client_with_graph_and_nodes_type(
                 GraphMap::from_edges([
@@ -1253,7 +1247,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn file_request_one_media() {
+    fn file_request_one_media() {
         let (mut client, (_, _), (_s_send, s_recv), (_, _), (_c_event_send, c_event_recv)) =
             client_with_graph_and_nodes_type(
                 GraphMap::from_edges([
@@ -1432,7 +1426,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn file_request_three_media_third_unavailable() {
+    fn file_request_three_media_third_unavailable() {
         let (mut client, (_, _), (_s_send, s_recv), (_, _), (_c_event_send, c_event_recv)) =
             client_with_graph_and_nodes_type(
                 GraphMap::from_edges([
@@ -1661,7 +1655,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn try_resend_packet_successfully() {
+    fn try_resend_packet_successfully() {
         let (mut client, (_, _), (_s_send, s_recv), (_, _), (_, _)) =
             client_with_graph_and_nodes_type(
                 GraphMap::from_edges([
@@ -1706,7 +1700,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn try_resend_packet_unsuccessfully() {
+    fn try_resend_packet_unsuccessfully() {
         let (mut client, (_, _), (_, _), (_, _), (_, _)) = client_with_graph_and_nodes_type(
             GraphMap::from_edges([
                 (1, 11, DEFAULT_WEIGHT),
@@ -1746,7 +1740,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn internal_send_to_controller() {
+    fn internal_send_to_controller() {
         let (client, (_, _), (_, _), (_, _), (_c_event_send, c_event_recv)) =
             client_with_graph_and_nodes_type(
                 GraphMap::from_edges([
@@ -1769,7 +1763,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn shortcut_successfully() {
+    fn shortcut_successfully() {
         let (client, (_, _), (_, _), (_, _), (_c_event_send, c_event_recv)) =
             client_with_graph_and_nodes_type(
                 GraphMap::from_edges([
@@ -1791,7 +1785,7 @@ mod web_client_tests {
     }
 
     #[test]
-    pub fn shortcut_unsuccessfully() {
+    fn shortcut_unsuccessfully() {
         let (client, (_, _), (_, _), (_, _), (_c_event_send, c_event_recv)) =
             client_with_graph_and_nodes_type(
                 GraphMap::from_edges([

@@ -1,10 +1,12 @@
 #[cfg(test)]
 mod test;
 
+// given a path it returns only the filename
 pub(crate) fn get_filename_from_path(s: &str) -> String {
     s.split('/').last().unwrap_or(s).to_string()
 }
 
+// given a html file, it looks for img tags and returns a vector of the files inside them
 pub(crate) fn get_media_inside_html_file(file_str: &str) -> Vec<String> {
     let document = scraper::Html::parse_document(file_str);
     let mut ret = vec![];
@@ -27,6 +29,9 @@ const REQ_ID_LEN: u8 = 16;
 pub(crate) type SessionId = u64;
 pub(crate) type RequestId = u16;
 
+// represents a unique identifier for packets
+// it uses 16 bits for a requestID and 48 for a packetID
+// they can be merged inside a 64 bit integer for compability with WG sessionID inside packets
 #[derive(Debug, Hash, Clone, PartialEq, Eq)]
 pub(crate) struct PacketId {
     packet_id: SessionId, // only 48 LSB used
@@ -39,7 +44,7 @@ impl PacketId {
             req_id: 0,
         }
     }
-
+    // decomposes the input into sessionID (48 most significant bits) and requestID (the 16 bit left)
     pub(crate) fn from_u64(n: u64) -> Self {
         Self {
             packet_id: n >> REQ_ID_LEN,
@@ -55,6 +60,8 @@ impl PacketId {
         self.req_id
     }
 
+    // returns a 64 bit the contains both packet and request IDs
+    // used for quickly obtaining the WG session_id
     pub(crate) fn get_session_id(&self) -> u64 {
         (self.packet_id << REQ_ID_LEN) | u64::from(self.req_id)
     }

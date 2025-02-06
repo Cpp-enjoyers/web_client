@@ -1,7 +1,7 @@
 /*!
     Web client module.
 
-    It contains the implementation of the web client and some
+    This crate contains the implementation of the web client made by Simone Dagnino for AP 2024/2025
 
 
 */

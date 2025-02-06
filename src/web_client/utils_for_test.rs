@@ -27,6 +27,7 @@ pub(crate) const COMPLEX_TOPOLOGY: [(u8, u8, f64); 14] = [
     (14, 2, DEFAULT_WEIGHT),
 ];
 
+// useful shotcut to create a client with initialized graph and nodes_type inside tests
 pub(crate) fn client_with_graph_and_nodes_type(
     graph: GraphMap<NodeId, f64, Directed>,
     nodes_type: HashMap<NodeId, GraphNodeType>,
