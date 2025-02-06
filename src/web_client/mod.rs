@@ -22,7 +22,7 @@ use std::thread::sleep;
 use std::vec;
 use wg_2024::network::{NodeId, SourceRoutingHeader};
 use wg_2024::packet::{
-    Ack, FloodRequest, FloodResponse, Fragment, Nack, NackType, NodeType, Packet, PacketType,
+    FloodRequest, FloodResponse, Fragment, Nack, NackType, NodeType, Packet, PacketType,
     FRAGMENT_DSIZE,
 };
 
@@ -35,8 +35,14 @@ mod test;
 #[cfg(test)]
 mod utils_for_test;
 
+/*
+    Default value put inside an edge in the topology graph
+*/
 const DEFAULT_WEIGHT: f64 = 0.5;
 
+/*
+    Enum to identify a node's type inside the topology
+*/
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GraphNodeType {
     TextServer,
@@ -64,6 +70,10 @@ impl From<NodeType> for GraphNodeType {
         }
     }
 }
+/*
+    common trait that represents the capability of fragment an object.
+    i.e. to split it in WG Fragments
+*/
 trait Fragmentable: Serializable {
     fn fragment(&self) -> Result<Vec<Fragment>, SerializationError>;
 
@@ -203,6 +213,9 @@ impl Fragmentable for ResponseMessage {
     }
 }
 
+/*
+    enum that represents all the requests that the web client can accept
+*/
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RequestType {
     TextList(NodeId),
@@ -212,6 +225,11 @@ enum RequestType {
     Media(String, NodeId),
 }
 
+/*
+    Struct that represent a request created the client.
+    It keeps track of packet that have been sent and are waiting for tha ACK
+    and also of the packet that compose the response from the server
+*/
 #[derive(Debug, Clone, PartialEq)]
 struct WebBrowserRequest {
     request_id: RequestId,
@@ -241,7 +259,21 @@ impl WebBrowserRequest {
         }
     }
 }
+/*
+    Struct that represent the web client
 
+    pending_requests: array of requests that the client is waiting to complete
+    packet_id_counter: incremental id that embed both the requestID and the packetID. This is used to easily handle the WG's sessionID
+    topology_graph: Directed graph that represents the topology. To avoid client/servers being in the middle of a path, this stores only edges outgoing from clients/servers
+    nodes_type: keeps track of each node's type,
+    packets_to_bo_sent_again: stores the outgoing packets for which I couldn't find a path or I received a NACK back instead of ACK. They need to be sent again
+    text_media_map: links a text filename and the nodeId that provided it to the media filenames that it requires
+    stored_files: stores the text/media file that are needed by an open request
+    media_file_either_owner_or_request_left: for every media file store either the owner or the list of media servers that still need to respond to the file list request
+    packets_sent_counter: it keeps track the number of packets (sent, lost) through every drone, used to calculate edge weight in the graph
+    routing_header_history: it kkeps track of the route of each packet until ack or nack are received, in order to correctly handle packets_sent_counter
+
+*/
 #[derive(Debug)]
 pub struct WebBrowser {
     id: NodeId,
@@ -256,12 +288,12 @@ pub struct WebBrowser {
     packet_id_counter: PacketId,
     topology_graph: DiGraphMap<NodeId, f64>,
     nodes_type: HashMap<NodeId, GraphNodeType>,
-    packets_to_bo_sent_again: VecDeque<(PacketId, Fragment)>, // stores the outgoing fragment for which I couldn't find a path or I received a NACK back instead of ACK
-    text_media_map: HashMap<(NodeId, String), Vec<String>>, // links a text filename and the nodeId that provided it to the media filenames that it requires
-    stored_files: HashMap<String, Vec<u8>>,                 // filename -> file
-    media_file_either_owner_or_request_left: HashMap<String, Either<Option<NodeId>, Vec<NodeId>>>, // for every media file store either the owner or the n. of remaining media list responses to know the owner
-    packets_sent_counter: HashMap<NodeId, (f64, f64)>, // track the number of packets (sent, lost) through every drone
-    routing_header_history: HashMap<PacketId, SourceRoutingHeader>, // keep track of the route of each packet until ack or nack are received, in order to correctly estimate PDR
+    packets_to_bo_sent_again: VecDeque<(PacketId, Fragment)>,
+    text_media_map: HashMap<(NodeId, String), Vec<String>>,
+    stored_files: HashMap<String, Vec<u8>>,
+    media_file_either_owner_or_request_left: HashMap<String, Either<Option<NodeId>, Vec<NodeId>>>,
+    packets_sent_counter: HashMap<NodeId, (f64, f64)>,
+    routing_header_history: HashMap<PacketId, SourceRoutingHeader>,
 }
 
 impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
@@ -303,6 +335,10 @@ impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
         }
     }
 
+    /*
+        at each iteration it checks if there is request ready to be completed
+        and it tries also to resend a packet in the queue, then it listens for a message
+     */
     fn run(&mut self) {
         info!(target: &self.log_prefix, "Web client is running");
         sleep(time::Duration::from_millis(100));
@@ -332,8 +368,10 @@ impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
 }
 
 impl WebBrowser {
-    // ! unit vs integration tests, doc
 
+    /*
+        takes the client event as a parameter and sends it to the scl
+     */
     fn internal_send_to_controller(&self, msg: WebClientEvent) {
         if let Err(e) = self.controller_send.send(msg.clone()) {
             error!(target: &self.log_prefix, "internal_send_to_controller: Cannot send message to scl: {e:?}");
@@ -342,6 +380,9 @@ impl WebBrowser {
         }
     }
 
+    /*
+        
+     */
     fn try_resend_packet(&mut self) {
         if let Some((id, frag)) = self.packets_to_bo_sent_again.pop_front() {
             if let Some(req) = self
