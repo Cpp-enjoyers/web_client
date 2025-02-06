@@ -38,11 +38,24 @@ fn simulate_server_compression(before: ResponseMessage) -> Vec<Fragment> {
 #[cfg(test)]
 mod web_client_tests {
 
-    use common::{slc_commands::{ServerType, TextMediaResponse}, web_messages::{self, Compression, GenericResponse, MediaResponse, RequestMessage, ResponseMessage, TextResponse}, Client};
+    use common::{
+        slc_commands::{ServerType, TextMediaResponse},
+        web_messages::{
+            self, Compression, GenericResponse, MediaResponse, RequestMessage, ResponseMessage,
+            TextResponse,
+        },
+        Client,
+    };
     use itertools::Either;
-    use wg_2024::{network::SourceRoutingHeader, packet::{Ack, FloodRequest, Fragment, Nack, NackType, NodeType, Packet, PacketType}};
-    use std::{collections::{HashMap, VecDeque}, env};
     use std::vec;
+    use std::{
+        collections::{HashMap, VecDeque},
+        env,
+    };
+    use wg_2024::{
+        network::SourceRoutingHeader,
+        packet::{Ack, FloodRequest, Fragment, Nack, NackType, NodeType, Packet, PacketType},
+    };
 
     use common::{
         slc_commands::{WebClientCommand, WebClientEvent},
@@ -51,96 +64,167 @@ mod web_client_tests {
     use crossbeam_channel::{unbounded, TryRecvError};
     use petgraph::prelude::{DiGraphMap, GraphMap};
 
-    use crate::{utils::PacketId, web_client::{test::simulate_server_compression, utils_for_test::{client_with_graph_and_nodes_type, COMPLEX_TOPOLOGY}, Fragmentable, GraphNodeType, RequestType, WebBrowserRequest, DEFAULT_WEIGHT}};
+    use crate::{
+        utils::PacketId,
+        web_client::{
+            test::simulate_server_compression,
+            utils_for_test::{client_with_graph_and_nodes_type, COMPLEX_TOPOLOGY},
+            Fragmentable, GraphNodeType, RequestType, WebBrowserRequest, DEFAULT_WEIGHT,
+        },
+    };
 
     #[test]
     pub fn handle_ack() {
-        let (
-            mut client,
-            (_, _),
-            (_, _),
-            (_, _),
-            (_c_event_send, c_event_recv),
-        ) = client_with_graph_and_nodes_type(
-            DiGraphMap::new(),
-            HashMap::from([(1, GraphNodeType::Client), (2, GraphNodeType::Server)]),
-        );
+        let (mut client, (_, _), (_, _), (_, _), (_c_event_send, c_event_recv)) =
+            client_with_graph_and_nodes_type(
+                DiGraphMap::new(),
+                HashMap::from([(1, GraphNodeType::Client), (2, GraphNodeType::Server)]),
+            );
 
         let mut ack = Packet::new_ack(SourceRoutingHeader::new(vec![2], 0), 0, 0);
         client.handle_packet(ack.clone());
-        assert_eq!(c_event_recv.recv().unwrap(), WebClientEvent::Shortcut(ack.clone()));
+        assert_eq!(
+            c_event_recv.recv().unwrap(),
+            WebClientEvent::Shortcut(ack.clone())
+        );
 
         ack.routing_header = SourceRoutingHeader::new(vec![2, 11, 1], 2);
-        client.routing_header_history.insert(PacketId::new(), SourceRoutingHeader::new(vec![1, 11, 2], 1));
-        client.pending_requests.push(WebBrowserRequest::new(0, 2, HashMap::from([(PacketId::new(), Fragment::from_string(0, 1, String::from("ciao")))]), Compression::Huffman, RequestType::ServersType));
+        client
+            .routing_header_history
+            .insert(PacketId::new(), SourceRoutingHeader::new(vec![1, 11, 2], 1));
+        client.pending_requests.push(WebBrowserRequest::new(
+            0,
+            2,
+            HashMap::from([(
+                PacketId::new(),
+                Fragment::from_string(0, 1, String::from("ciao")),
+            )]),
+            Compression::Huffman,
+            RequestType::ServersType,
+        ));
         client.handle_packet(ack);
-        assert!(client.pending_requests.get(0).unwrap().waiting_for_ack.is_empty());
+        assert!(client
+            .pending_requests
+            .get(0)
+            .unwrap()
+            .waiting_for_ack
+            .is_empty());
         assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(1., 0.));
     }
 
     #[test]
     pub fn handle_nack_dropped() {
-        let (
-            mut client,
-            (_, _),
-            (_s_send, s_recv),
-            (_, _),
-            (_c_event_send, c_event_recv),
-        ) = client_with_graph_and_nodes_type(
-            DiGraphMap::new(),
-            HashMap::from([(1, GraphNodeType::Client), (2, GraphNodeType::Server)]),
+        let (mut client, (_, _), (_s_send, s_recv), (_, _), (_c_event_send, c_event_recv)) =
+            client_with_graph_and_nodes_type(
+                DiGraphMap::new(),
+                HashMap::from([(1, GraphNodeType::Client), (2, GraphNodeType::Server)]),
+            );
+
+        let mut nack = Packet::new_nack(
+            SourceRoutingHeader::new(vec![2], 0),
+            0,
+            Nack {
+                fragment_index: 0,
+                nack_type: NackType::Dropped,
+            },
+        );
+        client.handle_packet(nack.clone());
+        assert_eq!(
+            c_event_recv.recv().unwrap(),
+            WebClientEvent::Shortcut(nack.clone())
         );
 
-        let mut nack = Packet::new_nack(SourceRoutingHeader::new(vec![2], 0), 0, Nack { fragment_index: 0, nack_type: NackType::Dropped });
-        client.handle_packet(nack.clone());
-        assert_eq!(c_event_recv.recv().unwrap(), WebClientEvent::Shortcut(nack.clone()));
-
         nack.routing_header = SourceRoutingHeader::new(vec![11, 1], 2);
-        client.routing_header_history.insert(PacketId::new(), SourceRoutingHeader::new(vec![1, 11, 2], 1));
-        client.pending_requests.push(WebBrowserRequest::new(0, 2, HashMap::from([(PacketId::new(), Fragment::from_string(0, 1, String::from("ciao")))]), Compression::Huffman, RequestType::ServersType));
+        client
+            .routing_header_history
+            .insert(PacketId::new(), SourceRoutingHeader::new(vec![1, 11, 2], 1));
+        client.pending_requests.push(WebBrowserRequest::new(
+            0,
+            2,
+            HashMap::from([(
+                PacketId::new(),
+                Fragment::from_string(0, 1, String::from("ciao")),
+            )]),
+            Compression::Huffman,
+            RequestType::ServersType,
+        ));
         client.handle_packet(nack);
-        assert!(!client.pending_requests.get(0).unwrap().waiting_for_ack.is_empty());
+        assert!(!client
+            .pending_requests
+            .get(0)
+            .unwrap()
+            .waiting_for_ack
+            .is_empty());
         assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(1., 1.));
         assert!(client.routing_header_history.is_empty());
-        assert_eq!(s_recv.recv().unwrap(), Packet::new_flood_request(SourceRoutingHeader::empty_route(), 0, FloodRequest::initialize(1, 1, NodeType::Client)));
+        assert_eq!(
+            s_recv.recv().unwrap(),
+            Packet::new_flood_request(
+                SourceRoutingHeader::empty_route(),
+                0,
+                FloodRequest::initialize(1, 1, NodeType::Client)
+            )
+        );
     }
 
     #[test]
     pub fn handle_nack_error_in_routing() {
-        let (
-            mut client,
-            (_, _),
-            (_s_send, s_recv),
-            (_, _),
-            (_c_event_send, c_event_recv),
-        ) = client_with_graph_and_nodes_type(
-            DiGraphMap::new(),
-            HashMap::from([(1, GraphNodeType::Client), (2, GraphNodeType::Server)]),
+        let (mut client, (_, _), (_s_send, s_recv), (_, _), (_c_event_send, c_event_recv)) =
+            client_with_graph_and_nodes_type(
+                DiGraphMap::new(),
+                HashMap::from([(1, GraphNodeType::Client), (2, GraphNodeType::Server)]),
+            );
+
+        let mut nack = Packet::new_nack(
+            SourceRoutingHeader::new(vec![2], 0),
+            0,
+            Nack {
+                fragment_index: 0,
+                nack_type: NackType::ErrorInRouting(11),
+            },
+        );
+        client.handle_packet(nack.clone());
+        assert_eq!(
+            c_event_recv.recv().unwrap(),
+            WebClientEvent::Shortcut(nack.clone())
         );
 
-        let mut nack = Packet::new_nack(SourceRoutingHeader::new(vec![2], 0), 0, Nack { fragment_index: 0, nack_type: NackType::ErrorInRouting(11) });
-        client.handle_packet(nack.clone());
-        assert_eq!(c_event_recv.recv().unwrap(), WebClientEvent::Shortcut(nack.clone()));
-
         nack.routing_header = SourceRoutingHeader::new(vec![11, 1], 2);
-        client.routing_header_history.insert(PacketId::new(), SourceRoutingHeader::new(vec![1, 11, 2], 1));
-        client.pending_requests.push(WebBrowserRequest::new(0, 2, HashMap::from([(PacketId::new(), Fragment::from_string(0, 1, String::from("ciao")))]), Compression::Huffman, RequestType::ServersType));
+        client
+            .routing_header_history
+            .insert(PacketId::new(), SourceRoutingHeader::new(vec![1, 11, 2], 1));
+        client.pending_requests.push(WebBrowserRequest::new(
+            0,
+            2,
+            HashMap::from([(
+                PacketId::new(),
+                Fragment::from_string(0, 1, String::from("ciao")),
+            )]),
+            Compression::Huffman,
+            RequestType::ServersType,
+        ));
         client.handle_packet(nack);
-        assert!(!client.pending_requests.get(0).unwrap().waiting_for_ack.is_empty());
+        assert!(!client
+            .pending_requests
+            .get(0)
+            .unwrap()
+            .waiting_for_ack
+            .is_empty());
         assert!(!client.topology_graph.contains_node(11));
         assert!(client.routing_header_history.is_empty());
-        assert_eq!(s_recv.recv().unwrap(), Packet::new_flood_request(SourceRoutingHeader::empty_route(), 0, FloodRequest::initialize(1, 1, NodeType::Client)));
+        assert_eq!(
+            s_recv.recv().unwrap(),
+            Packet::new_flood_request(
+                SourceRoutingHeader::empty_route(),
+                0,
+                FloodRequest::initialize(1, 1, NodeType::Client)
+            )
+        );
     }
 
     #[test]
     pub fn create_request() {
-        let (
-            mut client,
-            (_, _),
-            (_, _),
-            (_, _),
-            (_, _),
-        ) = client_with_graph_and_nodes_type(
+        let (mut client, (_, _), (_, _), (_, _), (_, _)) = client_with_graph_and_nodes_type(
             DiGraphMap::new(),
             HashMap::from([
                 (1, GraphNodeType::Client),
@@ -161,8 +245,15 @@ mod web_client_tests {
                 22,
                 HashMap::from([(
                     PacketId::new(),
-                    web_messages::RequestMessage::new_text_list_request(client.id, Compression::None)
-                        .fragment().unwrap().get(0).unwrap().clone()
+                    web_messages::RequestMessage::new_text_list_request(
+                        client.id,
+                        Compression::None
+                    )
+                    .fragment()
+                    .unwrap()
+                    .get(0)
+                    .unwrap()
+                    .clone()
                 )]),
                 Compression::None,
                 RequestType::TextList(22)
@@ -172,20 +263,21 @@ mod web_client_tests {
         client.pending_requests = vec![];
 
         client.create_request(RequestType::ServersType);
-        assert!(client.pending_requests.contains(
-            &WebBrowserRequest::new(
-                1,
-                3,
-                HashMap::from([(
-                    PacketId::from_u64(1),
-                    web_messages::RequestMessage::new_type_request(client.id, Compression::None).fragment().unwrap().get(0).unwrap().clone()
-                )]),
-                Compression::None,
-                RequestType::ServersType
-            ))
-        );
-
-
+        assert!(client.pending_requests.contains(&WebBrowserRequest::new(
+            1,
+            3,
+            HashMap::from([(
+                PacketId::from_u64(1),
+                web_messages::RequestMessage::new_type_request(client.id, Compression::None)
+                    .fragment()
+                    .unwrap()
+                    .get(0)
+                    .unwrap()
+                    .clone()
+            )]),
+            Compression::None,
+            RequestType::ServersType
+        )));
     }
 
     #[test]
@@ -312,7 +404,6 @@ mod web_client_tests {
 
         client.complete_request_with_generic_response(
             2,
-            RequestType::ServersType,
             &GenericResponse::InvalidRequest,
         );
         assert_eq!(
@@ -322,7 +413,6 @@ mod web_client_tests {
 
         client.complete_request_with_generic_response(
             2,
-            RequestType::ServersType,
             &GenericResponse::NotFound,
         );
         assert_eq!(
@@ -332,7 +422,6 @@ mod web_client_tests {
 
         client.complete_request_with_generic_response(
             2,
-            RequestType::ServersType,
             &GenericResponse::Type(ServerType::MediaServer),
         );
         assert_eq!(client.nodes_type.get(&2), Some(&GraphNodeType::MediaServer));
@@ -352,7 +441,10 @@ mod web_client_tests {
         client.add_new_edge(1, 2, 9.);
         assert!(client.topology_graph.contains_edge(1, 2));
         client.add_new_edge(1, 11, 23.);
-        assert_eq!(client.topology_graph.edge_weight(1, 11), Some(&DEFAULT_WEIGHT));
+        assert_eq!(
+            client.topology_graph.edge_weight(1, 11),
+            Some(&DEFAULT_WEIGHT)
+        );
     }
 
     #[test]
@@ -489,13 +581,7 @@ mod web_client_tests {
 
     #[test]
     pub fn graph_weight_update() {
-        let (
-            mut client,
-            (_, _),
-            (_, _),
-            (_, _),
-            (_, _),
-        ) = client_with_graph_and_nodes_type(
+        let (mut client, (_, _), (_, _), (_, _), (_, _)) = client_with_graph_and_nodes_type(
             DiGraphMap::from_edges([(1, 11, DEFAULT_WEIGHT), (11, 1, DEFAULT_WEIGHT)]),
             HashMap::from([(1, GraphNodeType::Client)]),
         );
@@ -514,7 +600,10 @@ mod web_client_tests {
         client.update_packet_counter_after_ack(&header);
         client.update_packet_counter_after_ack(&header);
         assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(4., 1.));
-        assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &(4. / 3.));
+        assert_eq!(
+            client.topology_graph.edge_weight(1, 11).unwrap(),
+            &(4. / 3.)
+        );
 
         client.update_packet_counter_after_ack(&header);
         client.update_packet_counter_after_nack(&header, 11);
@@ -529,11 +618,13 @@ mod web_client_tests {
         assert_eq!(client.packets_sent_counter.get(&11).unwrap(), &(16., 12.));
         assert_eq!(client.topology_graph.edge_weight(1, 11).unwrap(), &4.);
 
-        *client.packets_sent_counter.get_mut(&11).unwrap() = (0.,0.);
+        *client.packets_sent_counter.get_mut(&11).unwrap() = (0., 0.);
         client.update_packet_counter_after_nack(&header, 11);
-        assert!(client.topology_graph.edge_weight(1, 11).unwrap().is_infinite());
-
-
+        assert!(client
+            .topology_graph
+            .edge_weight(1, 11)
+            .unwrap()
+            .is_infinite());
     }
 
     #[test]
@@ -1011,7 +1102,6 @@ mod web_client_tests {
         if let WebClientEvent::ListOfFiles(files, id) = resp {
             assert_eq!(files, vec!["file1".to_string(), "file2".to_string()]);
             assert_eq!(id, 21);
-
         } else {
             assert!(false)
         }
@@ -1576,7 +1666,6 @@ mod web_client_tests {
 
     #[test]
     pub fn try_resend_packet_successfully() {
-
         let (mut client, (_, _), (_s_send, s_recv), (_, _), (_, _)) =
             client_with_graph_and_nodes_type(
                 GraphMap::from_edges([

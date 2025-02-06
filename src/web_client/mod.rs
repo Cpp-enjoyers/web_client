@@ -1,9 +1,20 @@
+use common::networking::flooder::Flooder;
+use common::ring_buffer::RingBuffer;
 use common::slc_commands::{ServerType, TextMediaResponse, WebClientCommand, WebClientEvent};
+use common::web_messages;
+use common::web_messages::{
+    Compression, GenericResponse, MediaResponse, RequestMessage, Response, ResponseMessage,
+    Serializable, SerializableSerde, SerializationError, TextResponse,
+};
+use common::Client;
 use compression::huffman::HuffmanCompressor;
-use flooding::RING_BUFF_SZ;
+use compression::lzw::LZWCompressor;
+use compression::Compressor;
 use core::time;
 use crossbeam_channel::{select_biased, Receiver, SendError, Sender};
+use flooding::RING_BUFF_SZ;
 use itertools::Either;
+use log::{error, info};
 use petgraph::algo::astar;
 use petgraph::prelude::DiGraphMap;
 use std::collections::{HashMap, VecDeque};
@@ -14,17 +25,6 @@ use wg_2024::packet::{
     Ack, FloodRequest, FloodResponse, Fragment, Nack, NackType, NodeType, Packet, PacketType,
     FRAGMENT_DSIZE,
 };
-use log::{error, warn, info};
-use common::networking::flooder::Flooder;
-use common::ring_buffer::RingBuffer;
-use common::web_messages;
-use common::web_messages::{
-    Compression, GenericResponse, MediaResponse, RequestMessage, Response, ResponseMessage,
-    Serializable, SerializableSerde, SerializationError, TextResponse,
-};
-use common::Client;
-use compression::lzw::LZWCompressor;
-use compression::Compressor;
 
 use crate::utils::{get_filename_from_path, get_media_inside_html_file, PacketId, RequestId};
 
@@ -332,13 +332,12 @@ impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
 }
 
 impl WebBrowser {
-    // ! unit vs integration tests, logs, doc
+    // ! unit vs integration tests, doc
 
     fn internal_send_to_controller(&self, msg: WebClientEvent) {
         if let Err(e) = self.controller_send.send(msg.clone()) {
             error!(target: &self.log_prefix, "internal_send_to_controller: Cannot send message to scl: {e:?}");
-        }
-        else {
+        } else {
             info!(target: &self.log_prefix, "internal_send_to_controller: Message sent to scl: {:?}", msg);
         }
     }
@@ -499,9 +498,7 @@ impl WebBrowser {
                 return Err(Box::new(e));
             }
 
-            let _ = self
-                .controller_send
-                .send(WebClientEvent::PacketSent(final_packet.clone()));
+            self.internal_send_to_controller(WebClientEvent::PacketSent(final_packet.clone()));
 
             info!(target: &self.log_prefix, "try_send_packet: Packet correctly sent the packet with ID: {} to {dest}", final_packet.session_id);
 
@@ -609,7 +606,11 @@ impl WebBrowser {
         }
     }
 
-    fn update_packet_counter_after_nack(&mut self, header: &SourceRoutingHeader, problematic_node: NodeId) {
+    fn update_packet_counter_after_nack(
+        &mut self,
+        header: &SourceRoutingHeader,
+        problematic_node: NodeId,
+    ) {
         for id in &header.hops {
             if *id == problematic_node {
                 break;
@@ -618,6 +619,8 @@ impl WebBrowser {
             self.packets_sent_counter
                 .entry(*id)
                 .and_modify(|(sent, _)| *sent += 1.);
+
+            info!(target: &self.log_prefix, "update_packet_counter_after_nack: Updating sent counter of {id}");
         }
 
         self.packets_sent_counter
@@ -626,6 +629,7 @@ impl WebBrowser {
                 *sent += 1.;
                 *lost += 1.;
             });
+        info!(target: &self.log_prefix, "update_packet_counter_after_nack: Updating sent and lost counter of {problematic_node}");
 
         self.update_graph_weight(problematic_node);
     }
@@ -635,6 +639,8 @@ impl WebBrowser {
             self.packets_sent_counter
                 .entry(*drone_id)
                 .and_modify(|(sent, _)| *sent += 1.);
+
+            info!(target: &self.log_prefix, "update_packet_counter_after_ack: Updating sent counter of {drone_id}");
 
             self.update_graph_weight(*drone_id);
         }
@@ -677,8 +683,7 @@ impl WebBrowser {
                         }
                     }
 
-                    self.nodes_type
-                        .insert(*id, (*node_type).into());
+                    self.nodes_type.insert(*id, (*node_type).into());
 
                     // initialize the packet counter
                     for (drone_id, _) in self
@@ -693,10 +698,10 @@ impl WebBrowser {
                 }
                 prev = Some((*id, *node_type));
             }
-
-
         } else if let Some(next_hop_drone_id) = packet.routing_header.next_hop() {
             if let Err(e) = self.try_send_packet(packet, next_hop_drone_id) {
+                info!(target: &self.log_prefix, "handle_flood_response: I coudln't find a path to forward the flood response - SHORTCUT");
+
                 // I don't have the channel to forward the flood response - SHORTCUT
                 self.shortcut(e.0);
             }
@@ -705,9 +710,9 @@ impl WebBrowser {
         }
     }
 
-    fn handle_ack(&mut self, packet: Packet, ack: &Ack) {
+    fn handle_ack(&mut self, packet: Packet) {
         if !self.client_is_destination(&packet) {
-            error!(target: &self.log_prefix, "handle_ack: Received an ack that is not for me");
+            error!(target: &self.log_prefix, "handle_ack: Received an ack that is not for me, shortcut");
             self.shortcut(packet);
             return;
         }
@@ -720,7 +725,6 @@ impl WebBrowser {
                     if let Some(header) = self.routing_header_history.remove(&packet_id) {
                         self.update_packet_counter_after_ack(&header);
                         info!(target: &self.log_prefix, "handle_ack: ack correctly elaborated {packet:?}");
-
                     }
                 } else {
                     info!(target: &self.log_prefix, "handle_ack: I received an ack for a packet that has already been acknowledged: {packet:?}");
@@ -734,6 +738,7 @@ impl WebBrowser {
 
     fn handle_fragment(&mut self, packet: Packet, fragment: &Fragment) {
         if !self.client_is_destination(&packet) {
+            error!(target: &self.log_prefix, "handle_fragment: Received a fragment that is not for me, shortcut");
             self.shortcut(packet);
             return;
         }
@@ -750,7 +755,7 @@ impl WebBrowser {
                     .iter()
                     .any(|f| f.fragment_index == fragment.fragment_index)
                 {
-                    println!("client {} - I received the same fragment multiple times, bug, ignoring the message", self.id);
+                    error!(target: &self.log_prefix, "handle_fragment: I received the same fragment multiple times, bug, ignoring the message");
                     return;
                 }
 
@@ -759,9 +764,10 @@ impl WebBrowser {
                 if req.incoming_messages.len() == n_frags {
                     // I have all the fragments
                     req.response_is_complete = true;
+                    info!(target: &self.log_prefix, "handle_fragment: I received all the fragment for the request {}", req.request_id);
                 }
 
-                let ack_dest = req.server_id;
+                let ack_destination = req.server_id;
 
                 // send ACK to acknowledge the packet
                 let ack = Packet::new_ack(
@@ -770,23 +776,22 @@ impl WebBrowser {
                     fragment.fragment_index,
                 );
 
-                if let Err(mut e) = self.try_send_packet(ack, ack_dest) {
-                    println!(
-                        "client {} - Can't find a path to the node, I need to shortcut ACK",
-                        self.id
-                    );
-                    e.0.routing_header = SourceRoutingHeader::initialize(vec![self.id, ack_dest]);
+                if let Err(mut e) = self.try_send_packet(ack, ack_destination) {
+                    error!(target: &self.log_prefix, "handle_fragment: Can't find a path to the node, I need to shortcut ACK");
+                    e.0.routing_header =
+                        SourceRoutingHeader::initialize(vec![self.id, ack_destination]);
                     self.shortcut(e.0);
                 }
             }
             None => {
-                println!("client {} - I received a fragment for req_id \"{}\" that it's unknown to me, dropping", self.id, PacketId::from_u64(packet.session_id).get_request_id());
+                info!(target: &self.log_prefix, "handle_fragment: I received a fragment for req_id \"{}\" that it's unknown to me, dropping",PacketId::from_u64(packet.session_id).get_request_id());
             }
         }
     }
 
     fn handle_nack(&mut self, packet: Packet, nack: &Nack) {
         if !self.client_is_destination(&packet) {
+            error!(target: &self.log_prefix, "handle_nack: Received a nack that is not for me, shortcut");
             self.shortcut(packet);
             return;
         }
@@ -801,7 +806,7 @@ impl WebBrowser {
                 {
                     f.clone()
                 } else {
-                    println!("client {} - I received a NACK for packet_id \"{}\" that it's unknown to me, dropping", self.id, PacketId::from_u64(packet.session_id).get_packet_id());
+                    error!(target: &self.log_prefix, "handle_nack: I received a NACK for packet_id \"{}\" that it's unknown to me, dropping", PacketId::from_u64(packet.session_id).get_packet_id());
                     return;
                 };
 
@@ -809,64 +814,48 @@ impl WebBrowser {
                     .routing_header_history
                     .remove(&PacketId::from_u64(packet.session_id));
 
+                let dest = req.server_id;
                 match nack.nack_type {
                     NackType::Dropped | NackType::DestinationIsDrone => {
-                        let dest = req.server_id;
-                        let new_packet = Packet::new_fragment(
-                            SourceRoutingHeader::empty_route(),
-                            packet.session_id,
-                            fragment.clone(),
-                        );
-
                         // update edges weight
                         if let NackType::Dropped = nack.nack_type {
-                            if let Some(header) = original_header{
+                            if let Some(header) = original_header {
                                 if let Some(source) = packet.routing_header.source() {
                                     self.update_packet_counter_after_nack(&header, source);
                                 }
                             }
                         }
-
-                        if self.try_send_packet(new_packet.clone(), dest).is_err() {
-                            self.packets_to_bo_sent_again.push_back((
-                                PacketId::from_u64(packet.session_id),
-                                fragment.clone(),
-                            ));
-                            self.start_flooding();
-                        }
                     }
 
                     NackType::ErrorInRouting(node_to_remove)
                     | NackType::UnexpectedRecipient(node_to_remove) => {
-                        let dest = req.server_id;
-
                         // remove problematic drone and search for a new path.
                         // if found send, otherwise start a flood
                         self.remove_node(node_to_remove);
-
-                        let p = Packet::new_fragment(
-                            SourceRoutingHeader::empty_route(),
-                            packet.session_id,
-                            fragment.clone(),
-                        );
-                        if self.try_send_packet(p, dest).is_err() {
-                            self.packets_to_bo_sent_again.push_back((
-                                PacketId::from_u64(packet.session_id),
-                                fragment.clone(),
-                            ));
-                            self.start_flooding();
-                        }
                     }
+                }
+
+                let new_packet = Packet::new_fragment(
+                    SourceRoutingHeader::empty_route(),
+                    packet.session_id,
+                    fragment.clone(),
+                );
+                if self.try_send_packet(new_packet, dest).is_err() {
+                    info!(target: &self.log_prefix, "handle_nack: I couldn't find a new path for the packet, starting a flood");
+                    self.packets_to_bo_sent_again
+                        .push_back((PacketId::from_u64(packet.session_id), fragment.clone()));
+                    self.start_flooding();
                 }
             }
             None => {
-                println!("client {} - I received a NACK for req_id \"{}\" that it's unknown to me, dropping", self.id, PacketId::from_u64(packet.session_id).get_request_id());
+                info!(target: &self.log_prefix, "handle_nack: I received a NACK for req_id \"{}\" that it's unknown to me, dropping", PacketId::from_u64(packet.session_id).get_request_id());
             }
         }
     }
 
     fn handle_packet(&mut self, packet: Packet) {
-        println!("client {} - handling packet: {:?}", self.id, packet);
+        info!(target: &self.log_prefix, "handle_packet: handling packet with ID: {}", packet.session_id);
+
         match packet.pack_type.clone() {
             PacketType::FloodRequest(mut req) => {
                 let _ =
@@ -877,8 +866,8 @@ impl WebBrowser {
                 self.handle_flood_response(packet, resp);
             }
 
-            PacketType::Ack(ref ack) => {
-                self.handle_ack(packet, ack);
+            PacketType::Ack(_) => {
+                self.handle_ack(packet);
             }
 
             PacketType::Nack(nack) => {
@@ -894,9 +883,9 @@ impl WebBrowser {
     fn complete_request_with_generic_response(
         &mut self,
         server_id: NodeId,
-        request_type: RequestType,
         resp: &GenericResponse,
     ) {
+        info!(target: &self.log_prefix, "complete_request_with_generic_response: I received a response of type: {:?}", resp);
         match resp {
             GenericResponse::Type(server_type) => {
                 self.nodes_type
@@ -909,6 +898,7 @@ impl WebBrowser {
                     .iter()
                     .any(|(_, t)| matches!(t, GraphNodeType::Server))
                 {
+                    info!(target: &self.log_prefix, "complete_request_with_generic_response: I discovered all the server type, preparing the response for scl");
                     let mut list = HashMap::new();
                     for (id, t) in &self.nodes_type {
                         match t {
@@ -924,14 +914,11 @@ impl WebBrowser {
                             _ => {}
                         }
                     }
+                    info!(target: &self.log_prefix, "complete_request_with_generic_response: Sending the server type's list to scl");
                     self.internal_send_to_controller(WebClientEvent::ServersTypes(list));
                 }
             }
-            GenericResponse::InvalidRequest => {
-                self.internal_send_to_controller(WebClientEvent::UnsupportedRequest);
-            }
-            GenericResponse::NotFound => {
-                // ! add apposite clientevent
+            GenericResponse::InvalidRequest | GenericResponse::NotFound => {
                 self.internal_send_to_controller(WebClientEvent::UnsupportedRequest);
             }
         }
@@ -943,14 +930,15 @@ impl WebBrowser {
         request_type: RequestType,
         resp: TextResponse,
     ) {
+        info!(target: &self.log_prefix, "complete_request_with_text_response: I received a response of type: {:?}", resp);
         match resp {
             TextResponse::TextList(vec) => {
-                println!("sending message to scl {{{vec:?}}}");
+                info!(target: &self.log_prefix, "complete_request_with_text_response: Sending text file list to scl: {{{vec:?}}}");
                 self.internal_send_to_controller(WebClientEvent::ListOfFiles(vec, server_id));
             }
             TextResponse::Text(file) => {
                 let RequestType::Text(text_path, _) = request_type else {
-                    println!("Response is not coherent with request, dropping request");
+                    error!(target: &self.log_prefix, "complete_request_with_text_response: Response is not coherent with the request, dropping");
                     return;
                 };
 
@@ -959,6 +947,7 @@ impl WebBrowser {
                 let needed_media = get_media_inside_html_file(&file_str);
 
                 if needed_media.is_empty() {
+                    info!(target: &self.log_prefix, "complete_request_with_text_response: The text file \"{text_path}\" doesn't need any media file, sending it to scl");
                     self.internal_send_to_controller(WebClientEvent::FileFromClient(
                         TextMediaResponse::new(
                             (get_filename_from_path(&text_path), file),
@@ -967,10 +956,7 @@ impl WebBrowser {
                         server_id,
                     ));
                 } else {
-                    println!(
-                        "client {} - I need {:?} for this file",
-                        self.id, needed_media
-                    );
+                    info!(target: &self.log_prefix, "complete_request_with_text_response: The text file \"{text_path}\" needs these media files: {{{needed_media:?}}}");
 
                     // store the file while waiting for media
                     self.stored_files.insert(text_path.clone(), file);
@@ -1005,15 +991,12 @@ impl WebBrowser {
                             ));
                             is_required_media_list_request = true;
                         }
-
-                        println!(
-                            "client {} - {:?}",
-                            self.id, self.media_file_either_owner_or_request_left
-                        );
                     }
 
                     if is_required_media_list_request {
                         // create media list request
+                        info!(target: &self.log_prefix, "complete_request_with_text_response: Creating media file requests");
+
                         self.nodes_type
                             .iter()
                             .filter(|(_, t)| **t == GraphNodeType::MediaServer)
@@ -1021,7 +1004,6 @@ impl WebBrowser {
                             .collect::<Vec<NodeId>>()
                             .iter()
                             .for_each(|id| {
-                                println!("client {} - creating media list request", self.id);
                                 self.create_request(RequestType::MediaList(*id));
                             });
                     }
@@ -1038,7 +1020,8 @@ impl WebBrowser {
     ) {
         match resp {
             MediaResponse::MediaList(file_list) => {
-                // for every needed file, remove the media server from file's list of requests
+                // for every needed media file inside media_file_either_owner_or_request_left,
+                // remove the media server from file's list of requests
                 for either in &mut self.media_file_either_owner_or_request_left.values_mut() {
                     if let Either::Right(media_server_list) = either {
                         if let Some(idx) = media_server_list.iter().position(|id| *id == server_id)
@@ -1050,9 +1033,10 @@ impl WebBrowser {
                         }
                     }
                 }
+                info!(target: &self.log_prefix, "complete_request_with_media: Updated media_file_either_owner_or_request_left is {:?}", self.media_file_either_owner_or_request_left);
 
-                // for every file in the list *that is needed*, if owner not set, set it and create request
-                // else, do nothing (the file is arriving)
+                // for every file in the list *that is needed*, if owner not set then set it and create request,
+                // else do nothing (the file is already arriving)
                 for media_path in file_list {
                     let file_is_needed = self
                         .text_media_map
@@ -1072,28 +1056,28 @@ impl WebBrowser {
                     if file_is_needed && !owner_is_set {
                         self.media_file_either_owner_or_request_left
                             .insert(media_path.clone(), Either::Left(Some(server_id)));
+
+                        info!(target: &self.log_prefix, "complete_request_with_media: creating request to node: {server_id} for media file {media_path}");
                         self.create_request(RequestType::Media(media_path, server_id));
                     }
                 }
             }
             MediaResponse::Media(file) => {
                 let RequestType::Media(media_path, _) = request_type else {
-                    println!("Response is not coherent with request, dropping request");
+                    info!(target: &self.log_prefix, "complete_request_with_media: Response is not coherent with request, dropping request");
                     return;
                 };
 
-                // store in the cache
+                // store the file
                 self.stored_files.insert(media_path.clone(), file);
+                info!(target: &self.log_prefix, "complete_request_with_media: Received the file {media_path} from {server_id}, storing the file");
             }
         }
     }
 
     fn complete_request(&mut self, mut req: WebBrowserRequest) {
-        // ! maybe add a check for each subfunction to check if the reqesut and response types are coeherent
-        println!(
-            "Client {}, completing req (id: {:?}, {:?}, to: {:?})",
-            self.id, req.request_id, req.request_type, req.server_id
-        );
+        info!(target: &self.log_prefix, "complete_request: completing req (id: {:?}, type: {:?}, to: {:?})", req.request_id, req.request_type, req.server_id);
+
         req.incoming_messages
             .sort_by(|f1, f2| f1.fragment_index.cmp(&f2.fragment_index));
 
@@ -1102,11 +1086,7 @@ impl WebBrowser {
         {
             match response_msg.content {
                 Response::Generic(resp) => {
-                    self.complete_request_with_generic_response(
-                        req.server_id,
-                        req.request_type,
-                        &resp,
-                    );
+                    self.complete_request_with_generic_response(req.server_id, &resp);
                 }
                 Response::Text(resp) => {
                     self.complete_request_with_text_response(req.server_id, req.request_type, resp);
@@ -1120,12 +1100,13 @@ impl WebBrowser {
                 }
             }
         } else {
-            println!("client {} - Cannot deserialize response, dropping", self.id);
+            error!(target: &self.log_prefix, "complete_request: Cannot deserialize response, dropping");
         }
     }
 
     fn handle_command(&mut self, command: WebClientCommand) {
-        println!("Handling command {command:?}");
+        info!(target: &self.log_prefix, "handle_command: Handling command {command:?}");
+
         match command {
             WebClientCommand::AddSender(id, sender) => {
                 self.packet_send.insert(id, sender);
@@ -1157,7 +1138,8 @@ impl WebBrowser {
 
     fn start_flooding(&mut self) {
         self.sequential_flood_id += 1;
-        println!("client {} - starting flood", self.id);
+
+        info!(target: &self.log_prefix, "start_flooding: starting flood with id {}", self.sequential_flood_id);
 
         let packet = Packet::new_flood_request(
             SourceRoutingHeader::empty_route(),
@@ -1181,10 +1163,12 @@ impl WebBrowser {
         frags: Vec<Fragment>,
         request_type: RequestType,
     ) {
-        println!("Adding request");
+        let new_req_id = self.packet_id_counter.get_request_id();
+
+        info!(target: &self.log_prefix, "add_request: adding new request to pending_request: (request_id: {new_req_id}, type: {request_type:?}, to: {server_id})");
 
         let mut new_request = WebBrowserRequest::new(
-            self.packet_id_counter.get_request_id(),
+            new_req_id,
             server_id,
             HashMap::new(),
             compression,
@@ -1207,6 +1191,8 @@ impl WebBrowser {
                     packet_sent.routing_header.clone(),
                 );
             } else {
+                info!(target: &self.log_prefix, "add_request: I couldn't send a packet, adding it to packets_to_bo_sent_again");
+
                 self.packets_to_bo_sent_again
                     .push_back((self.packet_id_counter.clone(), f));
                 self.start_flooding();
@@ -1220,44 +1206,43 @@ impl WebBrowser {
     }
 
     fn create_request(&mut self, request_type: RequestType) {
-        let compression: Compression; // TODO has to be chosen by scl or randomically
+        let compression: Compression;
+        let frags: Vec<Fragment>;
+        let dest: NodeId;
 
         match &request_type {
             RequestType::TextList(server_id) => {
                 if !self.is_correct_server_type(*server_id, &GraphNodeType::TextServer) {
+                    info!(target: &self.log_prefix, "create_request: The request type \"{request_type:?}\"is incompatible with the destination's type");
                     self.internal_send_to_controller(WebClientEvent::UnsupportedRequest);
                     return;
                 }
-
+                dest = *server_id;
                 compression = Compression::None;
-                let frags =
-                    web_messages::RequestMessage::new_text_list_request(self.id, compression.clone())
+                frags = web_messages::RequestMessage::new_text_list_request(self.id, compression.clone())
                         .fragment()
-                        .expect("Error during fragmentation. This can't happen. If it happens there is a bug somwhere");
-
-                self.add_request(*server_id, compression, frags, request_type);
+                        .expect("Error during fragmentation. This can't happen. If it happens there is a bug");
             }
 
             RequestType::MediaList(server_id) => {
                 if !self.is_correct_server_type(*server_id, &GraphNodeType::MediaServer) {
+                    info!(target: &self.log_prefix, "create_request: The request type \"{request_type:?}\"is incompatible with the destination's type");
                     self.internal_send_to_controller(WebClientEvent::UnsupportedRequest);
                     return;
                 }
-
+                dest = *server_id;
                 compression = Compression::None;
-                let frags =
+                frags =
                     web_messages::RequestMessage::new_media_list_request(self.id, compression.clone())
                         .fragment()
-                        .expect("Error during fragmentation. This can't happen. If it happens there is a bug somwhere");
-
-                self.add_request(*server_id, compression, frags, request_type);
+                        .expect("Error during fragmentation. This can't happen. If it happens there is a bug");
             }
 
             RequestType::ServersType => {
                 compression = Compression::None;
                 let frags = RequestMessage::new_type_request(self.id, compression.clone())
                 .fragment()
-                .expect("Error during fragmentation. This can't happen. If it happens there is a bug somwhere");
+                .expect("Error during fragmentation. This can't happen. If it happens there is a bug");
 
                 let server_list: Vec<NodeId> = self
                     .nodes_type
@@ -1274,41 +1259,40 @@ impl WebBrowser {
                         request_type.clone(),
                     );
                 }
+
+                return;
             }
 
             RequestType::Media(file_path, server_id) => {
                 compression = Compression::None;
                 if !self.is_correct_server_type(*server_id, &GraphNodeType::MediaServer) {
+                    info!(target: &self.log_prefix, "create_request: The request type \"{request_type:?}\"is incompatible with the destination's type");
                     self.internal_send_to_controller(WebClientEvent::UnsupportedRequest);
                     return;
                 }
-
-                let frags =
+                dest = *server_id;
+                frags =
                     web_messages::RequestMessage::new_media_request(self.id, compression.clone(), file_path.clone())
                         .fragment()
-                        .expect("Error during fragmentation. This can't happen. If it happens there is a bug somewhere");
-
-                self.add_request(*server_id, compression, frags, request_type);
+                        .expect("Error during fragmentation. This can't happen. If it happens there is a bug");
             }
 
             RequestType::Text(file_path, server_id) => {
                 compression = Compression::LZW;
                 if !self.is_correct_server_type(*server_id, &GraphNodeType::TextServer) {
-                    println!(
-                        "client {} - cannot ask for file because it is not a text file",
-                        self.id
-                    );
+                    info!(target: &self.log_prefix, "create_request: The request type \"{request_type:?}\"is incompatible with the destination's type");
                     self.internal_send_to_controller(WebClientEvent::UnsupportedRequest);
                     return;
                 }
-
-                let frags =
+                dest = *server_id;
+                frags =
                     web_messages::RequestMessage::new_text_request(self.id, compression.clone(), file_path.clone())
                         .fragment()
-                        .expect("Error during fragmentation. This can't happen. If it happens there is a bug somwhere");
-
-                self.add_request(*server_id, compression, frags, request_type);
+                        .expect("Error during fragmentation. This can't happen. If it happens there is a bug");
             }
         }
+        info!(target: &self.log_prefix, "create_request: Creating a new request (to: {dest}, type: {request_type:?}");
+
+        self.add_request(dest, compression, frags, request_type);
     }
 }

@@ -1,41 +1,47 @@
 #[cfg(test)]
-mod flood_test{
-    use std::{collections::HashMap, fmt::Debug, hash::BuildHasher};
+mod flood_test {
     use itertools::Itertools;
     use petgraph::prelude::{DiGraphMap, GraphMap};
-    use wg_2024::{network::SourceRoutingHeader, packet::{FloodResponse, NodeType, Packet}};
+    use std::{collections::HashMap, fmt::Debug, hash::BuildHasher};
+    use wg_2024::{
+        network::SourceRoutingHeader,
+        packet::{FloodResponse, NodeType, Packet},
+    };
 
-    use crate::web_client::{utils_for_test::{client_with_graph_and_nodes_type, COMPLEX_TOPOLOGY}, GraphNodeType, DEFAULT_WEIGHT};
+    use crate::web_client::{
+        utils_for_test::{client_with_graph_and_nodes_type, COMPLEX_TOPOLOGY},
+        GraphNodeType, DEFAULT_WEIGHT,
+    };
 
     /// compares two graphmaps
-fn graphmap_eq<N: Debug, E: Debug, Ty, Ix>(
-    a: &GraphMap<N, E, Ty, Ix>,
-    b: &GraphMap<N, E, Ty, Ix>,
-) -> bool
-where
-    N: PartialEq + PartialOrd + std::hash::Hash + Ord + Copy,
-    E: PartialEq + Copy + PartialOrd,
-    Ty: petgraph::EdgeType,
-    Ix: BuildHasher,
-{
-    // let a_ns = a.nodes();
-    // let b_ns = b.nodes();
+    fn graphmap_eq<N: Debug, E: Debug, Ty, Ix>(
+        a: &GraphMap<N, E, Ty, Ix>,
+        b: &GraphMap<N, E, Ty, Ix>,
+    ) -> bool
+    where
+        N: PartialEq + PartialOrd + std::hash::Hash + Ord + Copy,
+        E: PartialEq + Copy + PartialOrd,
+        Ty: petgraph::EdgeType,
+        Ix: BuildHasher,
+    {
+        // let a_ns = a.nodes();
+        // let b_ns = b.nodes();
 
-    let a_es = a.all_edges().map(|e| (e.0, e.1, *e.2));
-    let b_es = b.all_edges().map(|e| ((e.0, e.1, *e.2)));
-    a_es.sorted_by(|a, b| a.partial_cmp(b).unwrap())
-        .eq(b_es.sorted_by(|a, b| a.partial_cmp(b).unwrap()))
+        let a_es = a.all_edges().map(|e| (e.0, e.1, *e.2));
+        let b_es = b.all_edges().map(|e| ((e.0, e.1, *e.2)));
+        a_es.sorted_by(|a, b| a.partial_cmp(b).unwrap())
+            .eq(b_es.sorted_by(|a, b| a.partial_cmp(b).unwrap()))
 
-    // for (a, b, c) in a_es.sorted_by(|a, b| a.partial_cmp(b).unwrap()) {
-    //     print!("{a:?}, {b:?}, {c:?} - ");
-    // }
-    // println!("\n---");
-    // for (a, b, c) in b_es.sorted_by(|a, b| a.partial_cmp(b).unwrap()) {
-    //     print!("{a:?}, {b:?}, {c:?} - ");
-    // }
-    // println!("\n-----");
-    // true
-}
+        // for (a, b, c) in a_es.sorted_by(|a, b| a.partial_cmp(b).unwrap()) {
+        //     print!("{a:?}, {b:?}, {c:?} - ");
+        // }
+        // println!("\n---");
+        // for (a, b, c) in b_es.sorted_by(|a, b| a.partial_cmp(b).unwrap()) {
+        //     print!("{a:?}, {b:?}, {c:?} - ");
+        // }
+        // println!("\n-----");
+        // true
+    }
 
     #[test]
     pub fn start_flooding_simple_top() {

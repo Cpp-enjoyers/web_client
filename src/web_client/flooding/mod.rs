@@ -1,6 +1,9 @@
 use common::{networking::flooder::Flooder, ring_buffer::RingBuffer, slc_commands::WebClientEvent};
 use crossbeam_channel::Sender;
-use wg_2024::{network::NodeId, packet::{NodeType, Packet}};
+use wg_2024::{
+    network::NodeId,
+    packet::{NodeType, Packet},
+};
 
 use super::WebBrowser;
 

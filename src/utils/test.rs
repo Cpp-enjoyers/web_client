@@ -2,8 +2,6 @@
 mod utils_test {
     use crate::utils::{get_filename_from_path, get_media_inside_html_file, PacketId};
 
-
-
     #[test]
     pub fn filename_from_path() {
         let path = "a/b/c/d/e/ciao.txt".to_string();
