@@ -521,8 +521,8 @@ impl WebBrowser {
                     .remove(media_full_name);
             }
 
-            for media_full_name in media_list{
-                self.stored_files.remove(&media_full_name);
+            for media_full_name in &media_list{
+                self.stored_files.remove(media_full_name);
             }
 
             if html_file.1.is_empty() {
@@ -530,7 +530,7 @@ impl WebBrowser {
                 return;
             }
 
-            info!(target: &self.log_prefix, "send_text_and_media_back: Sending to scl the text file {:?} and all its needed media {:?}", html_file, media_files);
+            info!(target: &self.log_prefix, "send_text_and_media_back: Sending to scl the text file {:?} and all its needed media {:?}", html_file.0, media_list);
 
             self.internal_send_to_controller(&WebClientEvent::FileFromClient(
                 TextMediaResponse::new(html_file, media_files),
