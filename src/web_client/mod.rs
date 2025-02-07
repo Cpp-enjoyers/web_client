@@ -510,15 +510,19 @@ impl WebBrowser {
             );
             let mut media_files = vec![];
 
-            for media_full_name in media_list {
+            for media_full_name in &media_list {
                 media_files.push((
                     get_filename_from_path(&media_full_name),
                     self.stored_files
-                        .remove(&media_full_name)
-                        .unwrap_or_default(),
+                        .get(media_full_name)
+                        .unwrap_or(&vec![]).clone(),
                 ));
                 self.media_file_either_owner_or_request_left
-                    .remove(&media_full_name);
+                    .remove(media_full_name);
+            }
+
+            for media_full_name in media_list{
+                self.stored_files.remove(&media_full_name);
             }
 
             if html_file.1.is_empty() {
