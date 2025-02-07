@@ -1260,6 +1260,8 @@ impl WebBrowser {
 
         info!(target: &self.log_prefix, "start_flooding: starting flood with id {}", self.sequential_flood_id);
 
+        self.insert_flood((self.id, self.sequential_flood_id));
+
         let packet = Packet::new_flood_request(
             SourceRoutingHeader::empty_route(),
             0, // sessionId is useless in flood requests and responses
