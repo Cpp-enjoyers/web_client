@@ -618,7 +618,7 @@ mod client_tests {
     }
 
     #[test]
-    fn add_sender() {
+    fn add_sender_command() {
         let (
             mut client,
             (_c_send, _c_recv),
@@ -645,7 +645,7 @@ mod client_tests {
     }
 
     #[test]
-    fn remove_sender() {
+    fn remove_sender_command() {
         let (
             mut client,
             (_c_send, _c_recv),
@@ -1088,7 +1088,6 @@ mod client_tests {
 
         let resp = c_event_recv.recv().unwrap();
         //println!("--{:?}", resp);
-        println!("{:?}", client.packets_sent_counter);
         if let WebClientEvent::ListOfFiles(files, id) = resp {
             assert_eq!(files, vec!["file1".to_string(), "file2".to_string()]);
             assert_eq!(id, 21);
