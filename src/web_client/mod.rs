@@ -119,9 +119,7 @@ impl Fragmentable for RequestMessage {
             Compression::LZW => {
                 let compressed = <Vec<u16> as Serializable>::deserialize(msg)?;
 
-                LZWCompressor::new().decompress(compressed).map_err(|e| {
-                    SerializationError
-                })?
+                LZWCompressor::new().decompress(compressed).map_err(|_| SerializationError)?
             }
 
             Compression::None => msg,
@@ -131,9 +129,7 @@ impl Fragmentable for RequestMessage {
 
                 HuffmanCompressor::new()
                     .decompress(compressed)
-                    .map_err(|e| {
-                        SerializationError
-                    })?
+                    .map_err(|_| SerializationError)?
             }
         };
 
@@ -194,7 +190,7 @@ impl Fragmentable for ResponseMessage {
 
                 HuffmanCompressor::new()
                     .decompress(compressed)
-                    .map_err(|e| {
+                    .map_err(|_| {
                         SerializationError
                     })?
             }
