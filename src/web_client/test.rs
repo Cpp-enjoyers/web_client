@@ -35,6 +35,7 @@ fn simulate_server_compression(before: ResponseMessage) -> Vec<Fragment> {
     ret
 }
 
+
 #[cfg(test)]
 mod client_tests {
 
