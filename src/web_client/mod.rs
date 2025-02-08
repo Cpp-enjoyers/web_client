@@ -662,7 +662,7 @@ impl WebBrowser {
     // removes the node "node_to_remove" from graph and also from nodes_type and packet_sent_counter to keep consistency between the data structures
     fn remove_node(&mut self, node_to_remove: NodeId) {
         self.topology_graph.remove_node(node_to_remove);
-        self.nodes_type.remove(&node_to_remove);
+        //self.nodes_type.remove(&node_to_remove);
         self.packets_sent_counter.remove(&node_to_remove);
         info!(target: &self.log_prefix, "remove_node: Removed the node {node_to_remove} from graph");
         // if self
