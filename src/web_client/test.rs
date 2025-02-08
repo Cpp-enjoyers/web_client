@@ -513,7 +513,7 @@ mod client_tests {
         assert!(!client.topology_graph.contains_node(12));
         assert_eq!(
             client.nodes_type,
-            HashMap::from([(1, GraphNodeType::Client)])
+            HashMap::from([(1, GraphNodeType::Client), (12, GraphNodeType::Drone)])
         );
     }
 
@@ -666,7 +666,7 @@ mod client_tests {
         assert!(!client.topology_graph.contains_node(11));
         assert_eq!(
             client.nodes_type,
-            HashMap::from([(1, GraphNodeType::Client)])
+            HashMap::from([(1, GraphNodeType::Client), (11, GraphNodeType::Drone)])
         );
         assert_eq!(client.packets_sent_counter, HashMap::new());
     }
