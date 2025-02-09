@@ -306,7 +306,9 @@ pub struct WebBrowser {
     routing_header_history: HashMap<PacketId, SourceRoutingHeader>,
 }
 
-impl Client<WebClientCommand, WebClientEvent> for WebBrowser {
+impl Client for WebBrowser {
+    type T = WebClientCommand;
+    type U = WebClientEvent;
     /**
         Web client's constructor
         - id: Client's ID in the network
