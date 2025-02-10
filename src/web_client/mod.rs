@@ -845,9 +845,7 @@ impl WebBrowser {
             return;
         }
 
-        let source = if let Some(source) = packet.routing_header.source() {
-            source
-        } else {
+        let Some(source) = packet.routing_header.source() else {
             info!(target: &self.log_prefix, "I received a fragment without information about the sender, dropping");
             return;
         };

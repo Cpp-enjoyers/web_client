@@ -46,8 +46,8 @@ mod client_tests {
         },
     };
     use itertools::{Either, Itertools};
-    use std::vec;
     use std::collections::{HashMap, VecDeque};
+    use std::vec;
     use wg_2024::{
         network::SourceRoutingHeader,
         packet::{Ack, FloodRequest, Fragment, Nack, NackType, NodeType, Packet, PacketType},
