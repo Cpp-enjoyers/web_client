@@ -778,7 +778,9 @@ impl WebBrowser {
                         }
                     }
 
-                    self.nodes_type.insert(*to_id, (*to_type).into());
+                    if !self.nodes_type.contains_key(to_id){
+                        self.nodes_type.insert(*to_id, (*to_type).into());
+                    }
 
                     // initialize the packet counter
                     for (drone_id, _) in self
