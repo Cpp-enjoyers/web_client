@@ -517,9 +517,9 @@ impl WebBrowser {
                     .remove(media_full_name);
             }
 
-            // for media_full_name in &media_list {
-            //     self.stored_files.remove(media_full_name);
-            // }
+            for media_full_name in &media_list {
+                self.stored_files.remove(media_full_name);
+            }
 
             if html_file.1.is_empty() {
                 error!(target: &self.log_prefix, "send_text_and_media_back: The text file {} was not correctly stored, the entire request has to be dropped", key.1);
