@@ -38,13 +38,12 @@ mod utils_for_test;
 // Default value put inside an edge in the topology graph
 const DEFAULT_WEIGHT: f64 = 0.5;
 
-// represents a node's type
+// represents a node's type in the network
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GraphNodeType {
     TextServer,
     MediaServer,
     ChatServer,
-    Server,
     Client,
     Drone,
 }
@@ -62,7 +61,7 @@ impl From<NodeType> for GraphNodeType {
         match value {
             NodeType::Client => GraphNodeType::Client,
             NodeType::Drone => GraphNodeType::Drone,
-            NodeType::Server => GraphNodeType::Server,
+            NodeType::Server => GraphNodeType::ChatServer,
         }
     }
 }
@@ -201,7 +200,6 @@ impl Fragmentable for ResponseMessage {
 }
 
 // represents all the request types that the web client can accept
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RequestType {
     TextList(NodeId),
@@ -835,7 +833,7 @@ impl WebBrowser {
         }
     }
 
-    // if the fragment is for me, find the corresponding request and store packet fragmetn inside the response array
+    // if the fragment is for me, find the corresponding request and store the fragment inside the response array
     // and send the ack back to the server
     fn handle_fragment(&mut self, packet: Packet, fragment: &Fragment) {
         if !self.client_is_destination(&packet) {
@@ -844,9 +842,32 @@ impl WebBrowser {
             return;
         }
 
+        let source = if let Some(source) = packet.routing_header.source() {
+            source
+        } else{
+            info!(target: &self.log_prefix, "I received a fragment without information about the sender, dropping");
+            return;
+        };
+
+        if let Some(source_type) = self.nodes_type.get(&source){
+            if matches!(source_type, GraphNodeType::Client) {
+                info!(target: &self.log_prefix, "I received a fragment from a node that should not talk to me, ignoring");
+                return;
+            }
+        }
+        else {
+            info!(target: &self.log_prefix, "I received a fragment from an unknown sender, dropping");
+            return;
+        }
+
         match self.get_request_index(&packet) {
             Some(id) => {
                 let req = self.pending_requests.get_mut(id).unwrap();
+
+                if req.server_id != source{
+                    info!(target: &self.log_prefix, "I received a fragment from a node that is different from the server of the related request, dropping");
+                    return;
+                }
 
                 let n_frags = fragment.total_n_fragments as usize;
 
@@ -1000,31 +1021,25 @@ impl WebBrowser {
                     .entry(server_id)
                     .and_modify(|t| *t = (*server_type).into());
 
-                // if I discovered all the server type
-                if !self
-                    .nodes_type
-                    .iter()
-                    .any(|(_, t)| matches!(t, GraphNodeType::Server))
-                {
-                    info!(target: &self.log_prefix, "complete_request_with_generic_response: I discovered all the server type, preparing the response for scl");
-                    let mut list = HashMap::new();
-                    for (id, t) in &self.nodes_type {
-                        match t {
-                            GraphNodeType::ChatServer => {
-                                list.insert(*id, ServerType::ChatServer);
-                            }
-                            GraphNodeType::MediaServer => {
-                                list.insert(*id, ServerType::MediaServer);
-                            }
-                            GraphNodeType::TextServer => {
-                                list.insert(*id, ServerType::FileServer);
-                            }
-                            _ => {}
+                info!(target: &self.log_prefix, "complete_request_with_generic_response: Preparing the list of server types to end to scl");
+                let mut list = HashMap::new();
+                for (id, t) in &self.nodes_type {
+                    match t {
+                        GraphNodeType::ChatServer => {
+                            list.insert(*id, ServerType::ChatServer);
                         }
+                        GraphNodeType::MediaServer => {
+                            list.insert(*id, ServerType::MediaServer);
+                        }
+                        GraphNodeType::TextServer => {
+                            list.insert(*id, ServerType::FileServer);
+                        }
+                        _ => {}
                     }
-                    info!(target: &self.log_prefix, "complete_request_with_generic_response: Sending the server type's list to scl");
-                    self.internal_send_to_controller(&WebClientEvent::ServersTypes(list));
                 }
+                info!(target: &self.log_prefix, "complete_request_with_generic_response: Sending the server type's list to scl");
+                self.internal_send_to_controller(&WebClientEvent::ServersTypes(list));
+
             }
             GenericResponse::InvalidRequest | GenericResponse::NotFound => {
                 self.internal_send_to_controller(&WebClientEvent::UnsupportedRequest);
@@ -1380,7 +1395,7 @@ impl WebBrowser {
                 let server_list: Vec<NodeId> = self
                     .nodes_type
                     .iter()
-                    .filter(|(_, t)| matches!(t, GraphNodeType::Server))
+                    .filter(|(_, t)| matches!(t, GraphNodeType::ChatServer))
                     .map(|(id, _)| *id)
                     .collect();
 

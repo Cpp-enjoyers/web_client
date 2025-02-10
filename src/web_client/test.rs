@@ -46,8 +46,8 @@ mod client_tests {
             TextResponse,
         },
     };
-    use itertools::Either;
-    use std::collections::{HashMap, VecDeque};
+    use itertools::{Either, Itertools};
+    use std::{collections::{HashMap, VecDeque}, env};
     use std::vec;
     use wg_2024::{
         network::SourceRoutingHeader,
@@ -59,7 +59,7 @@ mod client_tests {
         web_messages::TextRequest,
     };
     use crossbeam_channel::{unbounded, TryRecvError};
-    use petgraph::prelude::{DiGraphMap, GraphMap};
+    use petgraph::{adj::UnweightedList, prelude::{DiGraphMap, GraphMap}};
 
     use crate::{
         utils::PacketId,
@@ -75,7 +75,7 @@ mod client_tests {
         let (mut client, (_, _), (_, _), (_, _), (_c_event_send, c_event_recv)) =
             client_with_graph_and_nodes_type(
                 DiGraphMap::new(),
-                HashMap::from([(1, GraphNodeType::Client), (2, GraphNodeType::Server)]),
+                HashMap::from([(1, GraphNodeType::Client), (2, GraphNodeType::ChatServer)]),
             );
 
         let mut ack = Packet::new_ack(SourceRoutingHeader::new(vec![2], 0), 0, 0);
@@ -114,7 +114,7 @@ mod client_tests {
         let (mut client, (_, _), (_s_send, s_recv), (_, _), (_c_event_send, c_event_recv)) =
             client_with_graph_and_nodes_type(
                 DiGraphMap::new(),
-                HashMap::from([(1, GraphNodeType::Client), (2, GraphNodeType::Server)]),
+                HashMap::from([(1, GraphNodeType::Client), (2, GraphNodeType::ChatServer)]),
             );
 
         let mut nack = Packet::new_nack(
@@ -169,7 +169,7 @@ mod client_tests {
         let (mut client, (_, _), (_s_send, s_recv), (_, _), (_c_event_send, c_event_recv)) =
             client_with_graph_and_nodes_type(
                 DiGraphMap::new(),
-                HashMap::from([(1, GraphNodeType::Client), (2, GraphNodeType::Server)]),
+                HashMap::from([(1, GraphNodeType::Client), (2, GraphNodeType::ChatServer)]),
             );
 
         let mut nack = Packet::new_nack(
@@ -227,7 +227,7 @@ mod client_tests {
                 (1, GraphNodeType::Client),
                 (22, GraphNodeType::TextServer),
                 (2, GraphNodeType::MediaServer),
-                (3, GraphNodeType::Server),
+                (3, GraphNodeType::ChatServer),
             ]),
         );
 
@@ -396,7 +396,7 @@ mod client_tests {
             (_c_event_send, c_event_recv),
         ) = client_with_graph_and_nodes_type(
             DiGraphMap::new(),
-            HashMap::from([(1, GraphNodeType::Client), (2, GraphNodeType::Server)]),
+            HashMap::from([(1, GraphNodeType::Client), (2, GraphNodeType::ChatServer)]),
         );
 
         client.complete_request_with_generic_response(2, &GenericResponse::InvalidRequest);
@@ -1099,7 +1099,6 @@ mod client_tests {
 
     #[test]
     fn server_type_request() {
-        // client 1 <--> 11 <--> 21 server
 
         let (mut client, (_, _), (_s_send, s_recv), (_, _), (_c_event_send, c_event_recv)) =
             client_with_graph_and_nodes_type(
@@ -1107,27 +1106,29 @@ mod client_tests {
                     (1, 11, DEFAULT_WEIGHT),
                     (11, 1, DEFAULT_WEIGHT),
                     (11, 21, DEFAULT_WEIGHT),
+                    (11, 22, DEFAULT_WEIGHT)
                 ]),
                 HashMap::from([
                     (1, GraphNodeType::Client),
                     (11, GraphNodeType::Drone),
-                    (21, GraphNodeType::Server),
+                    (21, GraphNodeType::ChatServer),
+                    (22, GraphNodeType::ChatServer),
                 ]),
             );
 
         client.handle_command(WebClientCommand::AskServersTypes);
 
         // receive request
-        let req = s_recv.recv().unwrap();
-        //println!("{:?}", req);
+        let req1 = s_recv.recv().unwrap();
+        let req2 = s_recv.recv().unwrap();
+        //println!("---{:?}", req1);
         let mut data = Vec::new();
-        match req.pack_type {
+        match req1.pack_type {
             PacketType::MsgFragment(f) => data.push(f),
             _ => {}
         };
         let resp = RequestMessage::defragment(&data, Compression::None).unwrap();
         c_event_recv.recv().unwrap();
-
         assert_eq!(
             resp,
             RequestMessage {
@@ -1140,15 +1141,15 @@ mod client_tests {
         client.handle_packet(Packet::new_ack(
             SourceRoutingHeader {
                 hop_index: 2,
-                hops: vec![21, 11, 1],
+                hops: vec![req1.routing_header.destination().unwrap(), 11, 1],
             },
-            req.session_id,
+            req1.session_id,
             0,
         ));
 
         // response
         let data = web_messages::ResponseMessage::new_type_response(
-            21,
+            req1.routing_header.destination().unwrap(),
             Compression::None,
             ServerType::FileServer,
         )
@@ -1159,7 +1160,7 @@ mod client_tests {
         client.handle_packet(Packet::new_fragment(
             SourceRoutingHeader {
                 hop_index: 2,
-                hops: vec![21, 11, 1],
+                hops: vec![req1.routing_header.destination().unwrap(), 11, 1],
             },
             3 << 50,
             data[0].clone(),
@@ -1172,14 +1173,78 @@ mod client_tests {
                 session_id: 3 << 50,
                 routing_header: SourceRoutingHeader {
                     hop_index: 1,
-                    hops: vec![1, 11, 21]
+                    hops: vec![1, 11, req1.routing_header.destination().unwrap()]
                 },
                 pack_type: PacketType::Ack(Ack { fragment_index: 0 })
             }
         );
 
+        // req2 handling
+        let mut data = Vec::new();
+        //println!("----{:?}", req2);
+        match req2.pack_type {
+            PacketType::MsgFragment(f) => data.push(f),
+            _ => {}
+        };
+        let resp = RequestMessage::defragment(&data, Compression::None).unwrap();
+        c_event_recv.recv().unwrap();
+        assert_eq!(
+            resp,
+            RequestMessage {
+                compression_type: Compression::None,
+                source_id: 1,
+                content: web_messages::Request::Type
+            }
+        );
+        // send ACK to client
+        client.handle_packet(Packet::new_ack(
+            SourceRoutingHeader {
+                hop_index: 2,
+                hops: vec![req2.routing_header.destination().unwrap(), 11, 1],
+            },
+            req2.session_id,
+            0,
+        ));
+
+        // response
+        let data = web_messages::ResponseMessage::new_type_response(
+            req2.routing_header.destination().unwrap(),
+            Compression::None,
+            ServerType::MediaServer,
+        )
+        .fragment()
+        .unwrap();
+        assert_eq!(data.len(), 1);
+
+        client.handle_packet(Packet::new_fragment(
+            SourceRoutingHeader {
+                hop_index: 2,
+                hops: vec![req2.routing_header.destination().unwrap(), 11, 1],
+            },
+            (3 << 51) + req2.session_id,
+            data[0].clone(),
+        ));
+
+        // control ACK from client
+        assert_eq!(
+            s_recv.recv().unwrap(),
+            Packet {
+                session_id: (3 << 51) + req2.session_id,
+                routing_header: SourceRoutingHeader {
+                    hop_index: 1,
+                    hops: vec![1, 11, req2.routing_header.destination().unwrap()]
+                },
+                pack_type: PacketType::Ack(Ack { fragment_index: 0 })
+            }
+        );
+
+        client.try_complete_request();
+
         // remove packet sent
         c_event_recv.recv().unwrap();
+        c_event_recv.recv().unwrap();
+        c_event_recv.recv().unwrap();
+
 
         client.try_complete_request();
 
@@ -1188,7 +1253,7 @@ mod client_tests {
         //println!("--{:?}", resp);
 
         if let WebClientEvent::ServersTypes(map) = resp {
-            assert_eq!(map, HashMap::from([(21, ServerType::FileServer)]));
+            assert!(!map.values().contains(&ServerType::ChatServer));
         } else {
             assert!(false)
         }
@@ -1206,7 +1271,7 @@ mod client_tests {
                 HashMap::from([
                     (1, GraphNodeType::Client),
                     (11, GraphNodeType::Drone),
-                    (21, GraphNodeType::Server),
+                    (21, GraphNodeType::ChatServer),
                 ]),
             );
 
