@@ -118,7 +118,9 @@ impl Fragmentable for RequestMessage {
             Compression::LZW => {
                 let compressed = <Vec<u16> as Serializable>::deserialize(msg)?;
 
-                LZWCompressor::new().decompress(compressed).map_err(|_| SerializationError)?
+                LZWCompressor::new()
+                    .decompress(compressed)
+                    .map_err(|_| SerializationError)?
             }
 
             Compression::None => msg,
@@ -189,9 +191,7 @@ impl Fragmentable for ResponseMessage {
 
                 HuffmanCompressor::new()
                     .decompress(compressed)
-                    .map_err(|_| {
-                        SerializationError
-                    })?
+                    .map_err(|_| SerializationError)?
             }
         };
 
@@ -505,16 +505,17 @@ impl WebBrowser {
 
             for media_full_name in &media_list {
                 media_files.push((
-                    get_filename_from_path(&media_full_name),
+                    get_filename_from_path(media_full_name),
                     self.stored_files
                         .get(media_full_name)
-                        .unwrap_or(&vec![]).clone(),
+                        .unwrap_or(&vec![])
+                        .clone(),
                 ));
                 self.media_file_either_owner_or_request_left
                     .remove(media_full_name);
             }
 
-            for media_full_name in &media_list{
+            for media_full_name in &media_list {
                 self.stored_files.remove(media_full_name);
             }
 
@@ -655,7 +656,7 @@ impl WebBrowser {
         }
     }
 
-    // removes the node "node_to_remove" from graph and also from nodes_type and packet_sent_counter to keep consistency between the data structures
+    // removes the node "node_to_remove" from graph and also from packet_sent_counter to keep consistency between the data structures
     fn remove_node(&mut self, node_to_remove: NodeId) {
         self.topology_graph.remove_node(node_to_remove);
         //self.nodes_type.remove(&node_to_remove);
@@ -778,7 +779,7 @@ impl WebBrowser {
                         }
                     }
 
-                    if !self.nodes_type.contains_key(to_id){
+                    if !self.nodes_type.contains_key(to_id) {
                         self.nodes_type.insert(*to_id, (*to_type).into());
                     }
 
@@ -846,18 +847,17 @@ impl WebBrowser {
 
         let source = if let Some(source) = packet.routing_header.source() {
             source
-        } else{
+        } else {
             info!(target: &self.log_prefix, "I received a fragment without information about the sender, dropping");
             return;
         };
 
-        if let Some(source_type) = self.nodes_type.get(&source){
+        if let Some(source_type) = self.nodes_type.get(&source) {
             if matches!(source_type, GraphNodeType::Client) {
                 info!(target: &self.log_prefix, "I received a fragment from a node that should not talk to me, ignoring");
                 return;
             }
-        }
-        else {
+        } else {
             info!(target: &self.log_prefix, "I received a fragment from an unknown sender, dropping");
             return;
         }
@@ -866,7 +866,7 @@ impl WebBrowser {
             Some(id) => {
                 let req = self.pending_requests.get_mut(id).unwrap();
 
-                if req.server_id != source{
+                if req.server_id != source {
                     info!(target: &self.log_prefix, "I received a fragment from a node that is different from the server of the related request, dropping");
                     return;
                 }
@@ -1041,7 +1041,6 @@ impl WebBrowser {
                 }
                 info!(target: &self.log_prefix, "complete_request_with_generic_response: Sending the server type's list to scl");
                 self.internal_send_to_controller(&WebClientEvent::ServersTypes(list));
-
             }
             GenericResponse::InvalidRequest | GenericResponse::NotFound => {
                 self.internal_send_to_controller(&WebClientEvent::UnsupportedRequest);

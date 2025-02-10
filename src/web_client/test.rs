@@ -35,7 +35,6 @@ fn simulate_server_compression(before: ResponseMessage) -> Vec<Fragment> {
     ret
 }
 
-
 #[cfg(test)]
 mod client_tests {
 
@@ -47,8 +46,11 @@ mod client_tests {
         },
     };
     use itertools::{Either, Itertools};
-    use std::{collections::{HashMap, VecDeque}, env};
     use std::vec;
+    use std::{
+        collections::{HashMap, VecDeque},
+        env,
+    };
     use wg_2024::{
         network::SourceRoutingHeader,
         packet::{Ack, FloodRequest, Fragment, Nack, NackType, NodeType, Packet, PacketType},
@@ -59,7 +61,10 @@ mod client_tests {
         web_messages::TextRequest,
     };
     use crossbeam_channel::{unbounded, TryRecvError};
-    use petgraph::{adj::UnweightedList, prelude::{DiGraphMap, GraphMap}};
+    use petgraph::{
+        adj::UnweightedList,
+        prelude::{DiGraphMap, GraphMap},
+    };
 
     use crate::{
         utils::PacketId,
@@ -279,13 +284,7 @@ mod client_tests {
 
     #[test]
     fn complete_request_with_media_response() {
-        let (
-            mut client,
-            (_, _),
-            (_, _),
-            (_, _),
-            (_, _),
-        ) = client_with_graph_and_nodes_type(
+        let (mut client, (_, _), (_, _), (_, _), (_, _)) = client_with_graph_and_nodes_type(
             DiGraphMap::new(),
             HashMap::from([
                 (1, GraphNodeType::Client),
@@ -337,20 +336,15 @@ mod client_tests {
 
     #[test]
     fn complete_request_with_text_response() {
-        let (
-            mut client,
-            (_, _),
-            (_, _),
-            (_, _),
-            (_c_event_send, c_event_recv),
-        ) = client_with_graph_and_nodes_type(
-            DiGraphMap::new(),
-            HashMap::from([
-                (1, GraphNodeType::Client),
-                (22, GraphNodeType::TextServer),
-                (2, GraphNodeType::MediaServer),
-            ]),
-        );
+        let (mut client, (_, _), (_, _), (_, _), (_c_event_send, c_event_recv)) =
+            client_with_graph_and_nodes_type(
+                DiGraphMap::new(),
+                HashMap::from([
+                    (1, GraphNodeType::Client),
+                    (22, GraphNodeType::TextServer),
+                    (2, GraphNodeType::MediaServer),
+                ]),
+            );
 
         let filename = "file1.html".to_string();
 
@@ -388,16 +382,11 @@ mod client_tests {
 
     #[test]
     fn complete_request_with_generic_response() {
-        let (
-            mut client,
-            (_, _),
-            (_, _),
-            (_, _),
-            (_c_event_send, c_event_recv),
-        ) = client_with_graph_and_nodes_type(
-            DiGraphMap::new(),
-            HashMap::from([(1, GraphNodeType::Client), (2, GraphNodeType::ChatServer)]),
-        );
+        let (mut client, (_, _), (_, _), (_, _), (_c_event_send, c_event_recv)) =
+            client_with_graph_and_nodes_type(
+                DiGraphMap::new(),
+                HashMap::from([(1, GraphNodeType::Client), (2, GraphNodeType::ChatServer)]),
+            );
 
         client.complete_request_with_generic_response(2, &GenericResponse::InvalidRequest);
         assert_eq!(
@@ -554,13 +543,7 @@ mod client_tests {
 
     #[test]
     fn is_correct_server_type() {
-        let (
-            client,
-            (_, _),
-            (_, _),
-            (_, _),
-            (_, _),
-        ) = client_with_graph_and_nodes_type(
+        let (client, (_, _), (_, _), (_, _), (_, _)) = client_with_graph_and_nodes_type(
             DiGraphMap::new(),
             HashMap::from([(1, GraphNodeType::Client), (12, GraphNodeType::Drone)]),
         );
@@ -1099,14 +1082,13 @@ mod client_tests {
 
     #[test]
     fn server_type_request() {
-
         let (mut client, (_, _), (_s_send, s_recv), (_, _), (_c_event_send, c_event_recv)) =
             client_with_graph_and_nodes_type(
                 GraphMap::from_edges([
                     (1, 11, DEFAULT_WEIGHT),
                     (11, 1, DEFAULT_WEIGHT),
                     (11, 21, DEFAULT_WEIGHT),
-                    (11, 22, DEFAULT_WEIGHT)
+                    (11, 22, DEFAULT_WEIGHT),
                 ]),
                 HashMap::from([
                     (1, GraphNodeType::Client),
@@ -1244,7 +1226,6 @@ mod client_tests {
         c_event_recv.recv().unwrap();
         c_event_recv.recv().unwrap();
         c_event_recv.recv().unwrap();
-
 
         client.try_complete_request();
 
