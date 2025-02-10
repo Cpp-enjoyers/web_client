@@ -47,10 +47,7 @@ mod client_tests {
     };
     use itertools::{Either, Itertools};
     use std::vec;
-    use std::{
-        collections::{HashMap, VecDeque},
-        env,
-    };
+    use std::collections::{HashMap, VecDeque};
     use wg_2024::{
         network::SourceRoutingHeader,
         packet::{Ack, FloodRequest, Fragment, Nack, NackType, NodeType, Packet, PacketType},
@@ -61,10 +58,7 @@ mod client_tests {
         web_messages::TextRequest,
     };
     use crossbeam_channel::{unbounded, TryRecvError};
-    use petgraph::{
-        adj::UnweightedList,
-        prelude::{DiGraphMap, GraphMap},
-    };
+    use petgraph::prelude::{DiGraphMap, GraphMap};
 
     use crate::{
         utils::PacketId,
