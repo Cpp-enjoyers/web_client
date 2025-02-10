@@ -1433,7 +1433,7 @@ impl WebBrowser {
             RequestType::Text(file_path, server_id) => {
                 compression = Compression::LZW;
                 if !self.is_correct_server_type(*server_id, &GraphNodeType::TextServer) {
-                    info!(target: &self.log_prefix, "create_request: The request type \"{request_type:?}\"is incompatible with the destination's type");
+                    info!(target: &self.log_prefix, "create_request: The request type \"{request_type:?}\"is incompatible with the destination's type: ({:?}", self.nodes_type);
                     self.internal_send_to_controller(&WebClientEvent::UnsupportedRequest);
                     return;
                 }
