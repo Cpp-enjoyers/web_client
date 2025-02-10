@@ -1093,7 +1093,7 @@ impl WebBrowser {
                     self.text_media_map
                         .insert((server_id, text_path.clone()), needed_media.clone());
 
-                    let mut is_required_media_list_request = false;
+                    //let mut is_required_media_list_request = false;
 
                     // for every media:
                     // if present in cache do nothing
