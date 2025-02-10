@@ -11,7 +11,8 @@ use compression::huffman::HuffmanCompressor;
 use compression::lzw::LZWCompressor;
 use compression::Compressor;
 use core::time;
-use crossbeam_channel::{select_biased, Receiver, SendError, Sender};
+use std::time::Duration;
+use crossbeam_channel::{after, select_biased, Receiver, SendError, Sender};
 use flooding::RING_BUFF_SZ;
 use itertools::Either;
 use log::{error, info};
@@ -383,6 +384,7 @@ impl Client for WebBrowser {
                         self.handle_packet(packet);
                     }
                 },
+                recv(after(Duration::from_millis(100))) -> _ => {}
             }
         }
     }
