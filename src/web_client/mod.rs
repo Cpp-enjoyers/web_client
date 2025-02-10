@@ -826,8 +826,8 @@ impl WebBrowser {
                 if req.waiting_for_ack.remove(&packet_id).is_some() {
                     if let Some(header) = self.routing_header_history.remove(&packet_id) {
                         self.update_packet_counter_ack(&header);
-                        info!(target: &self.log_prefix, "handle_ack: ack correctly elaborated {packet:?}");
                     }
+                    info!(target: &self.log_prefix, "handle_ack: ack correctly elaborated {packet:?}");
                 } else {
                     info!(target: &self.log_prefix, "handle_ack: I received an ack for a packet that has already been acknowledged: {packet:?}");
                 }
@@ -1265,7 +1265,7 @@ impl WebBrowser {
                 self.create_request(RequestType::Text(filename, server_id));
             }
 
-            WebClientCommand::Shortcut(packet) => self.handle_packet(packet),
+            WebClientCommand::Shortcut(packet) => {self.handle_packet(packet)},
         }
     }
 
