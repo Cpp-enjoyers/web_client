@@ -1117,11 +1117,11 @@ impl WebBrowser {
                                     .map(|(id, _)| *id)
                                     .collect(),
                             ));
-                            is_required_media_list_request = true;
+                            //is_required_media_list_request = true;
                         }
                     }
 
-                    if is_required_media_list_request {
+                   // if is_required_media_list_request {
                         // create media list request
                         info!(target: &self.log_prefix, "complete_request_with_text_response: Creating media file requests");
 
@@ -1134,7 +1134,7 @@ impl WebBrowser {
                             .for_each(|id| {
                                 self.create_request(RequestType::MediaList(*id));
                             });
-                    }
+                   // }
                 }
             }
         }
